@@ -7,6 +7,83 @@ import numpy as np
 
 from nestedbasinsampling.utils import SortedCollection
 
+class NestedSamplingRun(object):
+    """
+    """
+    def __init__(self, Vmax=[], nlive=None, volume=1., Vcut=np.inf, configs=None):
+        self.Vmax = Vmax
+        self.nlive = [1 for V in Vmax] if nlive is None else nlive
+        self.volume = volume
+        self.Vcut = Vcut
+        self.configs = None
+
+    def combine(self, run):
+        """
+        Joins this nested sampling run with the nested sampling run passed in
+
+        parameters
+        ----------
+        run : NestedSamplingRun (or derived class)
+            the nested sampling run joining with the current class
+
+        returns
+        -------
+        newrun : NestedSamplingRun (or derived class)
+            the combined nested sampling run
+        """
+        Vmax1 = self.Vmax
+        nlive1 = self.nlive
+        Vcut1 = self.Vcut
+
+        Vmax2 = run.Vmax
+        nlive2 = run.nlive
+        Vcut2 = run.Vcut
+
+        n1, n2 = len(Vmax1), len(Vmax2)
+        i1, i2 = 0, 0
+
+        Vmaxnew = []
+        nlivenew = []
+
+        while(i1!=n1 or i2!=n2):
+            V1 = Vmax1[i1] if i1 < n1 else -np.inf
+            live1 = nlive1[i1] if i1 < n1 else 0
+            V2 = Vmax2[i2] if i2 < n2 else -np.inf
+            live2 = nlive2[i2] if i2 < n2 else 0
+
+            if (V1 > V2):
+                Vmaxnew.append(V1)
+                nlive = live1
+                if V1 < Vcut2:
+                    nlive += live2
+                nlivenew.append(nlive)
+                i1 += 1
+            else:
+                Vmaxnew.append(V2)
+                nlive = live2
+                if V2 < Vcut1:
+                    nlive += live1
+                nlivenew.append(nlive)
+                i2 += 1
+
+        Vcut = max(Vcut1, Vcut2)
+
+        return type(self)(Vmax=Vmaxnew, nlive=nlivenew,
+                          volume=self.volume, Vcut=Vcut)
+
+    __add__ = combine # So Nested Sampling runs can be easily added together
+
+    def calcBasinFracVolume(self):
+        nlive = np.array(self.nlive)
+        self.frac = (nlive) / (nlive+1.)
+        self.fracVolume = np.cumprod(self.frac)
+        self.basinVolume = self.fracVolume*self.volume
+        return self.fracVolume
+
+    def calcBasinFracDoS(self, Vi, deltaV=None, err=False):
+        pass
+
+
 
 class LivePoints(SortedCollection):
     """ object to store the results of a nested sampling run, it maintains

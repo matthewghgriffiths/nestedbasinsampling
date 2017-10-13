@@ -5,6 +5,14 @@ import numpy as np
 from pele.takestep import TakestepInterface, AdaptiveStepsize
 from nestedbasinsampling.random import vector_random_uniform_hypersphere
 
+def hypersphere_step(coords, stepsize=1.0):
+    """
+    Generates random direction vector
+    """
+    coords = np.asanyarray(coords)
+    p = vector_random_uniform_hypersphere(coords.size).reshape(coords.shape)*stepsize
+    return p
+
 class TakestepHyperSphere(TakestepInterface):
 
     def __init__(self, stepsize=1.0):

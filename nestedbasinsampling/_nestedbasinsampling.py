@@ -10,37 +10,9 @@ from pele.optimize import lbfgs_cpp
 from nestedbasinsampling.utils import dict_update_keep, SortedCollection, Replica
 from nestedbasinsampling.database import Database
 from nestedbasinsampling.nestedsampling import NestedSampling
-from nestedbasinsampling.samplers import MCSampler
+from nestedbasinsampling.samplers import MCSampler, GalileanSampler
 from nestedbasinsampling.takestep import AdaptiveStepsize, TakestepHyperSphere
-from nestedbasinsampling.nestedoptimization import NestedGalileanOptimizer
-
-class SavePairs(object):
-    """
-    Class for saving the joint energies
-    """
-    def __init__(self, pairfile=None, isave=10000):
-        self.pairfile = pairfile
-        self.isave = isave
-
-        if pairfile is not None:
-            self.pairs = self.readresults()
-        else:
-            self.pairs = SortedCollection()
-
-    def add_pair(self, basinE, instantE):
-        self.pairs.insert((basinE,instantE))
-        if len(self.pairs) % self.isave == 0:
-            self.saveresults()
-
-    def saveresults(self):
-        if self.pairfile is not None:
-            with open(self.pairfile, 'wb') as f:
-                cPickle.dump(self.pairs, f)
-
-    def readresults(self, pairfile):
-        with open(pairfile, 'rb') as f:
-            pairs = cPickle.load(f)
-        return pairs
+from nestedbasinsampling.nestedoptimization import NestedGalileanOptimizer, NestedOptimizer
 
 class BasinPotential(object):
 
@@ -78,9 +50,6 @@ class NestedBasinSystem(BaseSystem):
             quench=lbfgs_cpp, quenchtol=1e-6,
             quench_kw=self.params.structural_quench_params)
         self.get_random_configuration = system.get_random_configuration
-
-    def get_savepairs(self, pairfile=None, isave=10000):
-        return SavePairs(pairfile, isave)
 
     def get_potential(self):
         min_kw = self.params.structural_quench_params
@@ -160,7 +129,6 @@ class NestedBasinSystem(BaseSystem):
                 E = pot.getEnergy(coords)
                 if E < Ecut:
                     replicas.append(Replica(coords, E))
-
         return replicas
 
     def get_nestedbasinsampling(self, replicas, sampler=None, **kwargs):
@@ -183,80 +151,83 @@ class NestedBasinSystem(BaseSystem):
         return nbs
 
 
+if __name__ == "__main__":
+    from pele.systems import LJCluster
+    from nestedbasinsampling.constraints import HardShellConstraint
+    from nestedbasinsampling.random import random_structure
+    import matplotlib.pyplot as plt
+    from plottingfuncs.plotting import ax3d
 
-from pele.systems import LJCluster
+    natoms = 13
+    natoms = 31
+    niter = 100
+    system = LJCluster(natoms)
 
-natoms = 13
-natoms = 31
-niter = 100
-system = LJCluster(natoms)
+    nsys = NestedBasinSystem(system)
 
-nsys = NestedBasinSystem(system)
+    radius =  float(natoms) ** (1. / 3)
+    rand_config = lambda : random_structure(natoms, radius)
+    constraint = HardShellConstraint(radius)
 
+    nsys.get_constraint = lambda : HardShellConstraint(radius)
 
-def constraint(coords):
-    pos = coords.reshape(-1,3)
-    pos -= pos.mean(0)[None,:]
-    return (np.linalg.norm(coords.reshape(-1,3),axis=1) < 3.).all()
+    nsys.params
 
-nsys.get_constraint = lambda : constraint
+    pot = system.get_potential()
 
-pot = system.get_potential()
-npot = nsys.get_potential()
-nsys.get_potential = lambda : pot
-
-
-coords = nsys.get_random_configuration()
-while(not constraint(coords) or pot.getEnergy(coords)>0):
     coords = nsys.get_random_configuration()
 
-opt = NestedGalileanOptimizer(coords, system.get_potential(),
-                              constraint=constraint, iprint=1)
-opt.run()
+    sampler = GalileanSampler(pot, stepsize=0.5, nsteps=30,
+                              constraint=constraint, verbose=1)
 
-#replicas = []
-#while len(replicas) < 5:
-#    replicas += [r for r in nsys.get_replicas(10) if r.energy < -5]
+    opt = NestedOptimizer(coords, system.get_potential(), sampler, nsteps=1000, iprint=1)
+    opt.run()
 
-replicas = nsys.get_replicas(5, -5)
+    replicas = nsys.get_replicas(10)
 
-raise
+    npot = nsys.get_potential()
 
-nsys.params.database['db'] = "nbs.sql"
-nsys.params.database['commit_interval'] = 1000
-
-npot = nsys.get_potential()
-db = nsys.create_database()
-
-nbs = nsys.get_nestedbasinsampling(replicas)
-
-for i in xrange(1000):
-    nbs.nested_step()
-
-raise
-
-badmin = [m for m in db.minima() if m.energy > -5.]
-for m in badmin:
-    db.session.delete(m)
-db.session.commit()
+    raise
 
 
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+    npot = nsys.get_potential()
+    nsys.get_potential = lambda : pot
 
-def plot3d(coords, **kwargs):
+    nsys.params.database['db'] = "nbs.sql"
+    nsys.params.database['commit_interval'] = 1000
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
+    npot = nsys.get_potential()
+    db = nsys.create_database()
 
-    ax.scatter(*coords.reshape(-1,3).T, **kwargs)
+    nbs = nsys.get_nestedbasinsampling(10)
 
-    return ax
+    for i in xrange(10000):
+        nbs.nested_step()
 
-rEs = np.array([r.energy for r in replicas])
-rEs.sort()
+    raise
 
-nbs = nestedsystem.get_nestedbasinsampling(100)
+    badmin = [m for m in db.minima() if m.energy > -5.]
+    for m in badmin:
+        db.session.delete(m)
+    db.session.commit()
 
-for i in xrange(1000):
-    nbs.nested_step()
+
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+
+    def plot3d(coords, **kwargs):
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+
+        ax.scatter(*coords.reshape(-1,3).T, **kwargs)
+
+        return ax
+
+    rEs = np.array([r.energy for r in replicas])
+    rEs.sort()
+
+    nbs = nestedsystem.get_nestedbasinsampling(100)
+
+    for i in xrange(1000):
+        nbs.nested_step()

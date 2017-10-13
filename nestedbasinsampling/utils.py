@@ -6,6 +6,11 @@ from bisect import bisect_left, bisect_right
 import inspect
 from weakref import WeakSet, WeakKeyDictionary
 
+import numpy as np
+from scipy.special import gamma
+
+def hyperspherevol(n, R=1.):
+    return np.pi**(0.5*n) * R**n / gamma(0.5*n + 1)
 
 class Signal(object):
     """ class for signal slot concept

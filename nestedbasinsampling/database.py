@@ -15,12 +15,103 @@ from sqlalchemy.schema import Index
 
 from nestedbasinsampling.utils import Signal
 
-__all__ = ["NestedSamplingRun", "Minimum", "TransitionState", "Database"]
+__all__ = ["NestedSamplingRun", "Minimum", "Replica", "TransitionState", "Database"]
 
 _schema_version = 2
 verbose=False
 
 Base = declarative_base()
+
+class Replica(Base):
+    """
+    The Replica class represents a replica in the database.
+
+    Parameters
+    ----------
+    energy : float
+    coords : numpy array
+        coordinates
+
+    Attributes
+    ----------
+    energy :
+        the energy of the replica
+    coords :
+        the coordinates of the replica.  This is stored as a pickled numpy
+        array which SQL interprets as a BLOB.
+    invalid :
+        a flag that can be used to indicate a problem with the minimum.  E.g. if
+        the Hessian has more zero eigenvalues than expected.
+    quench_energies :
+        A sorted list of the quench energies of the nested_runs
+    minima :
+        The list of ids of the minima found by the nested optimisation starting
+        from this replica
+    distribution :
+        this is used to store information about the distribution the replica
+        was generated from
+    user_data :
+        Space to store anything that the user wants.  This is stored in SQL
+        as a BLOB, so you can put anything here you want as long as it's serializable.
+        Usually a dictionary works best.
+
+    Notes
+    -----
+    To avoid any double entries of minima and be able to compare them,
+    only use `Database.addMinimum()` to create a minimum object.
+
+    See Also
+    --------
+    Database, TransitionState
+    """
+    __tablename__ = 'tbl_replicas'
+
+    _id = Column(Integer, primary_key=True)
+    energy = Column(Float)
+    # deferred means the object is loaded on demand, that saves some time / memory for huge graphs
+    coords = deferred(Column(PickleType))
+    '''coordinates of the minimum'''
+    invalid = Column(Integer)
+    """flag indicating if the replica is invalid"""
+    quench_energies = Column(PickleType)
+    """A sorted list of the quench energies of the nested_runs"""
+    minima = deferred(Column(PickleType))
+    """this stores the results of the nested sampling runs as the ids of
+    the minima found by the nested optimisation"""
+    distribution = deferred(Column(PickleType))
+    """this is used to store information about the distribution the replica
+    was generated from"""
+    user_data = deferred(Column(PickleType))
+    """this can be used to store information about the minimum"""
+
+    def __init__(self, energy, coords, quench_energies=[],
+                 minima=[], distribution={}, user_data=None):
+
+        self.energy = energy
+        self.coords = np.copy(coords)
+        self.invalid = False
+        self.quench_energies = quench_energies
+        self.minima = minima
+        self.distribution = distribution
+        self.user_data = user_data
+
+    def id(self):
+        """return the sql id of the object"""
+        return self._id
+
+    def __eq__(self, m):
+        """m can be integer or Minima object"""
+        assert self.id() is not None
+        if isinstance(m, Minimum):
+            assert m.id() is not None
+            return self.id() == m.id()
+        else:
+            return self.id() == m
+
+    def __hash__(self):
+        _id = self.id()
+        assert _id is not None
+        return _id
 
 class NestedSamplingRun(Base):
     """
@@ -785,6 +876,31 @@ class Database(object):
     def getMinimum(self, mid):
         """return the minimum with a given id"""
         return self.session.query(Minimum).get(mid)
+
+    def addReplica(self, energy, coords, commit=True, **kwargs):
+
+        self.lock.acquire()
+
+        replica = Replica(energy, coords, **kwargs)
+        self.session.add(replica)
+
+        if commit:
+            self.session.commit()
+
+        self.lock.release()
+        self.on_replica_added(replica)
+
+        return replica
+
+    def replica_adder(self, interval=None):
+        interval = self.commit_interval if interval is None else interval
+        return IntervalCommit(self, self.addReplica, commit_interval=interval)
+
+    def replicas(self):
+        return self.session.query(Replica).all()
+
+    def on_replica_added(self, replica):
+        pass
 
     def addTransitionState(self, energy, coords, min1, min2, commit=True,
                            eigenval=None, eigenvec=None, pgorder=None, fvib=None):
