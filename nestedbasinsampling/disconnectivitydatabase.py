@@ -97,15 +97,10 @@ class Minimum(Base):
             return self.id() == m
 
     def __hash__(self):
-        _id = hash(self.energy * self.id()) ## needed to differentiate from Replica
-        assert _id is not None
+        _id = self.id()
+        assert id is not None
+        _id = hash(self.energy * _id) ## needed to differentiate from Replica
         return _id
-
-#    def __repr__(self):
-#        return "Minimum(energy={:10.5g}, coords=array{:s})".format(
-#            self.energy, self.coords.shape)
-
-#    transition_states = relationship("transition_states", order_by="transition_states.id", backref="minima")
 
 class Replica(Base):
     """
@@ -188,13 +183,10 @@ class Replica(Base):
             return self.id() == m
 
     def __hash__(self):
-        _id = hash(self.energy * self.id() + self.id()) ## needed to differentiate from Minimum
-        assert _id is not None
+        _id = self.id()
+        assert id is not None
+        _id = hash(self.energy * _id) + _id ## needed to differentiate from Minimum
         return _id
-
-#    def __repr__(self):
-#        return "Replica(energy={:10.5g}, coords=array{:s})".format(
-#            self.energy, self.coords.shape)
 
 class Run(Base):
     """
@@ -224,6 +216,8 @@ class Run(Base):
         The Replica that the nested sampling run finished at
     volume : float, optional
         The volume enclosed by the contour defined by the parent replica
+    stored : numpy array, optional
+        List of the indexes that have been saved in configs and stepsizes
     configs : numpy array, optional
         List of the coordiates of the states visited by nested sampling
     stepsizes : numpy array, optional
@@ -236,6 +230,8 @@ class Run(Base):
     # deferred means the object is loaded on demand, that saves some time / memory for huge graphs
     Emax = deferred(Column(PickleType))
     nlive = deferred(Column(PickleType))
+    
+    stored = deferred(Column(PickleType))
     configs = deferred(Column(PickleType))
     stepsizes = deferred(Column(PickleType))
 
@@ -255,8 +251,8 @@ class Run(Base):
     user_data = deferred(Column(PickleType))
     """this can be used to store information about the nested sampling run"""
 
-    def __init__(self, Emax, nlive, parent, child,
-                 volume=1., configs=None, stepsizes=None):
+    def __init__(self, Emax, nlive, parent, child, volume=1., 
+                 stored=None, configs=None, stepsizes=None):
 
         self.Emax = np.array(Emax)
         self.nlive = np.array(nlive)
@@ -265,8 +261,9 @@ class Run(Base):
         self.parent = parent
         self.child = child
 
-        self.configs = configs if configs is None else np.array(configs)
-        self.stepsizes = stepsizes if stepsizes is None else np.array(stepsizes)
+        self.stored = np.array([]) if stored is None else np.array(stored)
+        self.configs = None if configs is None else np.array(configs)
+        self.stepsizes = None if stepsizes is None else np.array(stepsizes)
 
         self.invalid = False
 
@@ -285,12 +282,106 @@ class Run(Base):
 
     def __hash__(self):
         _id = self.id()
-        assert _id is not None
+        assert id is not None
+        _id = hash(self.Emax[0] * _id) ## needed to differentiate from Path
         return _id
 
-#    def __repr__(self):
-#        return "Run(parentE={:10.5g}, childE={:10.5g}, N={:5d})".format(
-#            self.parent.energy, self.parent.energy, len(self.Emax))
+
+class Path(Base):
+    """
+    The Path class represents a path between a replica and
+    another replica or minimum
+
+    Parameters
+    ----------
+    energy : float
+    parent : Replica
+    child : Replica or Minimum
+    
+    stored : numpy array
+    energies : numpy array, optional
+    configs : numpy array, optional
+    stepsizes : numpy array, optional
+
+    Attributes
+    ----------
+    energy : float
+        The maximum energy visited by the path
+    parent : Replica
+        The Replica that the nested sampling started at
+    childReplica : Replica
+        The Replica that the nested sampling run finished at
+    childMinimum : Minimum
+        The Minimum the minimisation finishes at
+        
+    energies : numpy array, optional
+        List of energies visted by the path
+    configs : numpy array, optional
+        List of the coordiates of the states visited by nested sampling
+    """
+    __tablename__ = 'tbl_path'
+    _id = Column(Integer, primary_key=True)
+    energy = Column(Float)
+
+    # deferred means the object is loaded on demand, that saves some time / memory for huge graphs
+    energies = deferred(Column(PickleType))
+    configs = deferred(Column(PickleType))
+
+    _parent_id = Column(Integer, ForeignKey('tbl_replicas._id'))
+    parent = relationship("Replica",
+                            primaryjoin="Replica._id==Path._parent_id")
+    """The replica associated with the start of the path"""
+
+    _childReplica_id = Column(Integer, ForeignKey('tbl_replicas._id'))
+    childReplica = relationship("Replica",
+                            primaryjoin="Replica._id==Path._childReplica_id")
+    """The replica associated with the end of the path"""
+    
+    _childMinimum_id = Column(Integer, ForeignKey('tbl_minima._id'))
+    childMinimum = relationship("Minimum",
+                            primaryjoin="Minimum._id==Path._childMinimum_id")
+    """The minimum associated with the end of the path"""
+
+    invalid = Column(Integer)
+    """flag indicating if the path is invalid"""
+    user_data = deferred(Column(PickleType))
+    """this can be used to store information about the nested sampling run"""
+
+    def __init__(self, energy, parent, child, energies=None, configs=None):
+
+        self.energy = np.array(energy)
+
+        self.parent = parent
+        if type(child) is Minimum:
+            self.childMinimum = child
+        elif type(child) is Replica:
+            self.childReplica = child
+
+        self.energies = None if energies is None else np.array(configs)
+        self.configs  = None if configs is None else np.array(stepsizes)
+
+        self.invalid = False
+        
+    def id(self):
+        """return the sql id of the object"""
+        return self._id
+
+    def __eq__(self, m):
+        """m can be integer or Minima object"""
+        assert self.id() is not None
+        if isinstance(m, Minimum):
+            assert m.id() is not None
+            return self.id() == m.id()
+        else:
+            return self.id() == m
+
+    def __hash__(self):
+        _id = self.id()
+        assert id is not None
+        _id = hash(self.energy * _id) + _id ## needed to differentiate from Path
+        return _id
+
+        
 
 class TransitionState(Base):
     """Transition state object
@@ -457,11 +548,11 @@ class SystemProperty(Base):
         """return a tuple of (name, value)"""
         return self.name(), self.value()
 
-Index('idx_runs', Run.__table__.c._parent_id, Run.__table__.c._child_id)
+#Index('idx_runs', Run.__table__.c._parent_id, Run.__table__.c._child_id)
 Index('idx_transition_states', TransitionState.__table__.c._minimum1_id,
       TransitionState.__table__.c._minimum2_id)
 
-Index('idx_replica_energy', Replica.__table__.c.energy)
+#Index('idx_replica_energy', Replica.__table__.c.energy)
 Index('idx_minimum_energy', Minimum.__table__.c.energy)
 Index('idx_transition_state_energy', Minimum.__table__.c.energy)
 
@@ -657,6 +748,8 @@ class Database(object):
         self.on_replica_removed = Signal()
         self.on_run_added = Signal()
         self.on_run_removed = Signal()
+        self.on_path_added = Signal()
+        self.on_path_removed = Signal()
 
 
         self.lock = threading.Lock()
@@ -692,12 +785,75 @@ class Database(object):
         if _schema_version != schema:
             raise IOError("database schema outdated, current (newest) version: "
                           "%d (%d). Please use migrate_db.py in pele/scripts to update database"%(schema, _schema_version))
+                          
+    def paths(self):
+        return self.session.query(Path).all()
+    
+    def addPath(self, energy, parent, child, 
+                energies=None, configs=None, commit=True):
+                
+        self.lock.acquire()
+
+        configs = None if configs is None else np.asanyarray(configs)
+        new = Path(energy, parent, child,
+                   energies=energies, configs=configs)
+
+        self.session.add(new)
+        if commit:
+            self.session.commit()
+
+        self.lock.release()
+
+        self.on_path_added(new)
+
+        return new
+        
+    def get_path(self, pathid):
+        """ returns nested sampling run corresponding to that id """
+        return  self.session.query(Path).get(pathid)
+
+    def update_path(self, path, energy, parent, child, 
+                    energies=None, configs=None, commit=True):
+        """
+        Parameters
+        ----------
+        path: NestedSamplingRun or id
+            NestedSamplingRun object or id to update
+        configs : list of numpy.array, optional
+            list of configurations of dead points
+        commit : bool, optional
+            commit changes to database
+        """
+
+        pathid = path.id() if isinstance(path, Path) else path
+
+        self.lock.acquire()
+
+        run = self.get_run(runid)
+
+        run.energy = np.asanyarray(Emax)
+        run.Nlive = np.asanyarray(Nlive)
+        run.parent = parent
+        run.child = child
+        run.volume = volume
+        run.configs = None if configs is None else np.asanyarray(configs)
+
+        if commit:
+            self.session.commit()
+
+        self.lock.release()
+
+        return run
+
+    def path_adder(self, interval=None):
+        interval = self.commit_interval if interval is None else interval
+        return IntervalCommit(self, self.add_path, commit_interval=interval)
 
     def runs(self):
         return self.session.query(Run).all()
 
-    def addRun(self, Emax, Nlive, parent, child,
-                volume=1., configs=None, stepsizes=None, commit=True):
+    def addRun(self, Emax, Nlive, parent, child, volume=1., 
+               stored=None, configs=None, stepsizes=None, commit=True):
         """add a new minimum to database
 
         Parameters
@@ -722,8 +878,8 @@ class Database(object):
         self.lock.acquire()
 
         configs = None if configs is None else np.asanyarray(configs)
-        new = Run(Emax, Nlive, parent, child,
-                  volume=volume, configs=configs, stepsizes=stepsizes)
+        new = Run(Emax, Nlive, parent, child, volume=volume, 
+                  stored=stored, configs=configs, stepsizes=stepsizes)
 
         self.session.add(new)
         if commit:
@@ -1105,6 +1261,11 @@ class Database(object):
             ts.minimum2 = min1
             if ts.minimum1.id() > ts.minimum2.id():
                 ts.minimum1, ts.minimum2 = ts.minimum2, ts.minimum1
+                
+        candidates = self.session.query(Path).\
+            filter(Path.childMinimum == min2)
+        for path in candidates:
+            path.childMinimum = min1
 
         self.session.delete(min2)
         self.session.commit()
@@ -1262,20 +1423,24 @@ def test_fast_insert(): # pragma: no cover
 
 if __name__ == "__main__":
 
-    db = Database()
+    db = Database('tmp.sql')
 
-    m = db.addMinimum(1., np.random.random((100,31,3)))
+    r1 = db.addReplica(1., np.random.random((100,31*3)))
+    r2 = db.addReplica(0., np.random.random((100,31*3)))
+    m = db.addMinimum(-1., np.random.random((100,31*3)))
+    
+    run = db.addRun([0.,1.],[1,1],r1,r2)
+    path1 = db.addPath(1., r1, r2)
+    path2 = db.addPath(0., r2, m)
 
     print m
-
-    raise
 
 if __name__ == "__main__":
     test_fast_insert()
 
 if __name__ == "__main__":
 
-    db = Database('test2.sql')
+    db = Database('test.sql')
 
     Es = np.random.random(100)
     Coords = np.random.random((100,31,3))
@@ -1287,13 +1452,3 @@ if __name__ == "__main__":
     for i in xrange(100): adder(np.random.random(), np.random.random((31,3)))
 
     for E, coords in zip(Es, Coords): adder(E, coords)
-
-if __name__ == "__main__":
-
-    from nestedbasinsampling.utils import Result
-
-    db = Database('test.sql')
-    adder = db.minimumRes_adder(interval=100)
-
-    for i in xrange(100): adder(Result(energy=np.random.random(),coords=np.random.random((31,3))))
-

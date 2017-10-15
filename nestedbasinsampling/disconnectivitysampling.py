@@ -14,301 +14,13 @@ from pele.optimize import lbfgs_cpp
 from nestedbasinsampling.utils import dict_update_keep
 from nestedbasinsampling.samplers import SamplingError, GMCSampler
 from nestedbasinsampling.constraints import BaseConstraint
-from nestedbasinsampling.nestedoptimization import BasinPotential, AdaptiveNestedOptimizer
+from nestedbasinsampling.nestedoptimization import \
+    BasinPotential, AdaptiveNestedOptimizer
+from nestedbasinsampling.disconnectivitydatabase import \
+    Minimum, Replica, Run, Database
+from nestedbasinsampling.disconnectivitygraphs import \
+    ReplicaGraph, BasinGraph, SuperBasin, AndersonDarling
 
-from nestedbasinsampling.disconnectivitydatabase import Minimum, Replica, Run, Database
-
-class NestedGraph(object):
-
-    def __init__(self, database=None,
-                 run_adder=None, rep_adder=None, min_adder=None):
-
-        database = Database() if database is None else database
-        # These methods will be used to create new objects
-        self.NewRun = database.addRun     if run_adder is None else run_adder
-        self.NewRep = database.addReplica if rep_adder is None else rep_adder
-        self.NewMin = database.addMinimum if min_adder is None else min_adder
-
-        # Create new graph from database
-        self.loadFromDatabase(database, newGraph=True)
-
-    def loadFromDatabase(self, database, newGraph=True):
-        if newGraph:
-            self.repGraph = nx.DiGraph()
-
-        self.database = database
-
-        minima = self.database.minima()
-        replicas = self.database.replicas()
-        runs = self.database.runs()
-
-        self.addMinima(minima)
-        self.addReplicas(replicas)
-        self.addRuns(runs)
-
-    def Minimum(self, energy, coords):
-        m = self.NewMin(energy, coords)
-        self.addMinima([m])
-        return m
-
-    def Replica(self, energy, coords, minimum=None, stepsize=None):
-        rep = self.NewRep(energy, coords, minimum=minimum, stepsize=stepsize)
-        self.addReplicas([rep])
-        return rep
-
-    def Run(self, Emax, nlive, parent, child,
-            volume=1., configs=None, stepsizes=None):
-        run = self.NewRun(Emax, nlive, parent, child,
-                          volume=volume, configs=configs, stepsizes=stepsizes)
-        self.addRuns([run])
-        return run
-
-    def addMinima(self, minima):
-        for m in minima:
-            self.repGraph.add_node(m, energy=m.energy)
-
-    def addReplicas(self, replicas):
-        for rep in replicas:
-            self.repGraph.add_node(rep, energy=rep.minimum)
-            if rep.minimum is not None:
-                self.repGraph.add_edge(rep, rep.minimum, type='min',
-                                    Erep=rep.energy, Emin=rep.minimum.energy)
-
-    def addRuns(self, runs):
-        for run in runs:
-            self.repGraph.add_edge(run.parent, run.child, run=run, type='run',
-                                Ecut=run.parent.energy, Emin=run.child.energy)
-
-    def replicas(self, order=True):
-        if order:
-            return sorted((n for n in self.repGraph.nodes() if type(n) is Replica),
-                          key=lambda r: r.energy)
-        else:
-            return [n for n in self.repGraph.nodes() if type(n) is Replica]
-
-    def minima(self, order=True):
-        if order:
-            return sorted((n for n in self.repGraph.nodes() if type(n) is Minimum),
-                          key=lambda r: r.energy)
-        else:
-            return [n for n in self.repGraph.nodes() if type(n) is Minimum]
-
-    def runs(self):
-        edges = self.repGraph.edge
-        runs = []
-        for node1, edges1 in edges.iteritems():
-            for node2, attr in edges1.iteritems():
-                if attr['type'] is 'run':
-                    runs.append(attr['run'])
-        return runs
-
-    def findSamples(self, replica):
-        successors = self.repGraph.successors(replica)
-        runs = [self.repGraph.get_edge_data(replica, rep)['run']
-                for rep in successors if type(rep) is Replica]
-        samples = []
-        for run in runs:
-            if len(run.Emax) == 1:
-                samples.append(run.child.coords)
-            else:
-                samples.append(run.configs[1])
-        return samples
-
-    def findPredecessors(self, node1, node2):
-        pred1 = set(sum(bfs_edges(self.repGraph.reverse(), node1),()))
-        return pred1.intersection(sum(bfs_edges(self.repGraph.reverse(), node1),()))
-
-    def splitRun(self, run, Ecut, replace=False):
-
-        configs = run.configs
-        nlive = run.nlive
-        stepsizes = run.stepsizes
-        Emax = run.Emax
-        volume = run.volume
-        parent = run.parent
-        child = run.child
-
-        i = - np.searchsorted(Emax[::-1], Ecut) - 1
-
-        if self.database is not None and replace:
-            self.database.removeRun(run)
-            NewRep = self.Replica
-            NewRun = self.Run
-        else:
-            NewRep = Replica
-            NewRun = Run
-
-        newrep = NewRep(configs[i], Emax[i], stepsize=stepsizes[i])
-        run1 =   NewRun(Emax[:i+1], nlive[:i+1], parent, child, volume=volume,
-                        configs=configs[:i+1],stepsizes=stepsizes[:i+1])
-        run2 =   NewRun(Emax[i+1:], nlive[i+1:], newrep, child,
-                        configs=configs[i+1:], stepsizes=stepsizes[i+1:])
-
-        if replace:
-            self.repGraph.remove_edge(parent, child)
-
-        return run1, run2, newrep
-
-    def draw(self, **kwargs):
-        pos = nx.nx_agraph.graphviz_layout(self.repGraph, prog='dot')
-        nx.draw(self.repGraph, pos, **kwargs)
-
-class SuperBasin(object):
-    """ SuperBasin object.
-
-    A super basin is defined by a single replica. All the states accessible via
-    downhill paths from this replica are part of the superbasin.
-
-    Attributes
-    ----------
-    replicas : frozenset of Replica
-        a frozenset of replicas sampled from superbasin
-    """
-    def __init__(self, replicas=frozenset()):
-        self.replicas = frozenset(replicas)
-        self.energies = sorted(rep.energy for rep in self.replicas)
-        self.energy = self.energies[0]
-
-    def __iter__(self):
-        return iter(self.replicas)
-
-    def __add__(self, new):
-        new = [new] if type(new) is Replica else new
-        replicas = self.replicas.union(new)
-        return self.__class__(replicas=replicas)
-
-    def __hash__(self):
-        return hash(self.replicas)
-
-class BasinGraph(object):
-
-    def __init__(self, graph):
-        self.graph = graph
-        self.initialise()
-
-    def initialise(self):
-
-        self.basinGraph = nx.DiGraph()
-
-        replicas = self.graph.replicas()
-        minima = self.graph.minima()
-
-        self.repnodes = dict((rep, SuperBasin([rep])) for rep in replicas)
-        self.repnodes.update((m,m) for m in minima)
-
-        for node in self.repnodes.values():
-            self.add_node(node)
-        for parent, child in self.graph.repGraph.edges_iter():
-            self.add_edge(self.repnodes[parent], self.repnodes[child])
-
-    def add_node(self, node, **kwargs):
-        self.basinGraph.add_node(node, energy=node.energy, **kwargs)
-
-    def add_edge(self, parent, child, **kwargs):
-        self.basinGraph.add_edge(parent, child, Eparent=parent.energy,
-                                 Echild=child.energy, **kwargs)
-
-    def update(self, newGraph=False):
-        if newGraph:
-            return self.initialise()
-
-        replicas = self.graph.replicas()
-        minima = self.graph.minima()
-
-        newrepnodes = dict((rep, SuperBasin([rep])) for rep in replicas
-                           if rep not in self.repnodes)
-        newrepnodes.update((m,m) for m in minima if m not in self.repnodes)
-
-        self.repnodes.update(newrepnodes)
-
-        for node in newrepnodes.itervalues():
-            self.add_node(node, energy=node.energy)
-
-        for key in newrepnodes.iterkeys():
-            edges = self.graph.repGraph.edge[key]
-            for childkey in edges:
-                self.add_edge(self.repnodes[key], self.repnodes[childkey])
-
-    def joinBasins(self, basins):
-        newbasin = sum(basins, [])
-
-        self.basinGraph.add_node(newbasin)
-
-        predecessors = set(sum((self.basinGraphs.predecessors(b)
-                               for b in basins), [])).difference(basins)
-        successors = set(sum((self.basinGraphs.successors(b)
-                              for b in basins), [])).difference(basins)
-
-        for parent in predecessors:
-            self.add_edge(parent, newbasin)
-        for child in successors:
-            self.add_edge(newbasin, child)
-
-    def draw(self, **kwargs):
-        pos = nx.nx_agraph.graphviz_layout(self.basinGraph, prog='dot')
-        nx.draw(self.basinGraph, pos, **kwargs)
-
-def combineRuns(run1, run2):
-    Emax1 = run1.Emax
-    nlive1 = run1.nlive
-    Ecut1 = run1.Ecut
-    vol1 = run1.volume
-
-    Emax2 = run2.Emax
-    nlive2 = run2.nlive
-    Ecut2 = run2.Ecut
-    vol2 = run2.volume
-
-    # If the configurations/stepsizes have been stored these need to be
-    # combined as well
-    config = ((run2.configs is not None or len(run2)==0) and
-              (run1.configs is not None or len(run1)==0))
-    stepsize = ((run2.stepsizes is not None or len(run2)==0) and
-                (run1.stepsizes is not None or len(run1)==0))
-    configs = [] if config else None
-    stepsizes = [] if stepsize else None
-
-    n1, n2 = len(Emax1), len(Emax2)
-    i1, i2 = 0, 0
-
-    Emaxnew = []
-    nlivenew = []
-
-    while(i1!=n1 or i2!=n2):
-        E1 = Emax1[i1] if i1 < n1 else -np.inf
-        live1 = nlive1[i1] if i1 < n1 else 0
-        E2 = Emax2[i2] if i2 < n2 else -np.inf
-        live2 = nlive2[i2] if i2 < n2 else 0
-
-        if (E1 > E2):
-            Emaxnew.append(E1)
-            nlive = live1
-            if E1 < Ecut2:
-                nlive += live2
-            nlivenew.append(nlive)
-            if config:
-                configs.append(run1.configs[i1])
-            if stepsize:
-                stepsizes.append(run1.stepsizes[i1])
-            i1 += 1
-        else:
-            Emaxnew.append(E2)
-            nlive = live2
-            if E2 < Ecut1:
-                nlive += live1
-            nlivenew.append(nlive)
-            if config:
-                configs.append(run2.configs[i2])
-            if stepsize:
-                stepsizes.append(run2.stepsizes[i2])
-            i2 += 1
-
-    Ecut, volume = max(((Ecut1,vol1), (Ecut2,vol2)))
-    configs = np.array(configs) if config else None
-    stepsizes = np.array(stepsizes) if config else None
-
-    return Run(Emax=Emaxnew, nlive=nlivenew, configs=configs,
-               volume=volume, Ecut=Ecut, stepsizes=stepsizes)
 
 class DisconnectivitySystem(object):
     """
@@ -319,7 +31,8 @@ class DisconnectivitySystem(object):
                  globalbasin=None, database=None, startseed=0):
 
         self.pot = pot
-        self.constraint = BaseConstraint() if constraint is None else constraint
+        self.constraint = (BaseConstraint() if constraint is None 
+                           else constraint)
 
         self.sampler = sampler
         self.sampler_kw = sampler_kw
@@ -332,8 +45,8 @@ class DisconnectivitySystem(object):
         seed(self.seed)
         np.random.seed(self.seed)
 
-    def get_database(self):
-        return Database()
+    def get_database(self, *args, **kwargs):
+        return Database(*args, **kwargs)
 
     def get_sampler(self, **kwargs):
         dict_update_keep(kwargs, self.sampler_kw)
@@ -347,7 +60,8 @@ class DisconnectivitySystem(object):
 
         ## Saving as module variables to allow inspection of values
         self._sampler = self.sampler(self.pot, **sampler_kw)
-        self._opt = self.minimizer(coords, self.pot, self._sampler, **kwargs)
+        self._opt = self.minimizer(coords, self.pot, 
+                                   self._sampler, **kwargs)
         self._res = self._opt.run()
         return self._res
 
@@ -371,19 +85,19 @@ class DisconnectivitySampler(object):
         self.sampler = sampler
 
         self.database = database
-        self.graph = NestedGraph(database, run_adder=run_adder,
+        self.repGraph = ReplicaGraph(database, run_adder=run_adder,
                                  rep_adder=rep_adder, min_adder=min_adder
                                  ) if graph is None else graph
 
-        self.basinGraph = BasinGraph(self.graph)
+        self.basinGraph = BasinGraph(self.repGraph)
 
-        self.NewRun = self.graph.NewRun
-        self.NewRep = self.graph.NewRep
-        self.NewMin = self.graph.NewMin
+        self.NewRun = self.repGraph.NewRun
+        self.NewRep = self.repGraph.NewRep
+        self.NewMin = self.repGraph.NewMin
 
-        self.Run = self.graph.Run
-        self.Replica = self.graph.Replica
-        self.Minimum = self.graph.Minimum
+        self.Run = self.repGraph.Run
+        self.Replica = self.repGraph.Replica
+        self.Minimum = self.repGraph.Minimum
 
         self.random_config = random_config
         self.debug=debug
@@ -398,7 +112,7 @@ class DisconnectivitySampler(object):
             else:
                 stepsize = replica.stepsize
 
-        samples = self.graph.findSamples(replica)
+        samples = self.repGraph.findSamples(replica)
 
         # Generating starting location
         if replica.coords is None: # Sample randomly
@@ -496,21 +210,79 @@ disSystem = DisconnectivitySystem(pot, constraint=constraint,
 
 sampler = disSystem.get_sampler()
 bpot = disSystem.get_basinpotential()
-db = disSystem.get_database()
+db = disSystem.get_database("dis.sql")
+
+
 driver = DisconnectivitySampler(pot, bpot, sampler, debug=True,
     random_config=rand_config, database=db)
 
-g = driver.graph
+g = driver.repGraph
+bG = driver.basinGraph
+
+basins = driver.basinGraph.basins()
+
+basin = driver.basinGraph.get_lowest_basin()
+
+gbasin = basins[-1]
+
+minDistr = driver.basinGraph.getBasinMinimaDistribution(gbasin)
+
+Es, fs = zip(*((m.energy, f) for m,f in minDistr))
+
+calcCDF = AndersonDarling.calcCDF
+
+E1s, F1s, f1s = calcCDF(Es,fs)
+E2s, F2s, f2s = calcCDF(E1s+0.5,fs)
+
+Es = np.r_[E1s, E2s]
+Es.sort(kind='mergesort')
+
+F1i = np.searchsorted(E1s, Es,side='right')
+F1c = np.r_[F1s,0.][F1i-1]
+
+F2i = np.searchsorted(E2s, Es,side='right')
+F2c = np.r_[F2s,0.][F2i-1]
+
+plt.ion()
+
+plt.plot(E1s, F1s)
+plt.plot(E2s, F2s)
+
+
+plt.plot(Es, F1c)
+plt.plot(Es, F2c)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+raise
 
 replica = driver.Replica(np.inf, None)
-minima, runs = driver.sampleReplica(replica, nsamples=3)
+minima, runs = driver.sampleMinima(replica, nsamples=10)
+
+driver.basinGraph.update()
 
 m1, m2 = minima[:2]
 
 for path in nx.all_simple_paths(g.repGraph, replica, m1):
     print [r.energy for r in path]
 
-bG = g.basinGraph
+
 
 raise
 
