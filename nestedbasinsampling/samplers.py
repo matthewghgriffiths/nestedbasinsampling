@@ -2,9 +2,11 @@
 
 import numpy as np
 
+from pele.optimize import lbfgs_cpp
+
 from nestedbasinsampling.utils import Replica, Result
-from nestedbasinsampling.random import vector_random_uniform_hypersphere as rand_hsphere
-from nestedbasinsampling.takestep import AdaptiveStepsize, TakestepHyperSphere, hypersphere_step
+from nestedbasinsampling.takestep import \
+    AdaptiveStepsize, TakestepHyperSphere, hypersphere_step
 from nestedbasinsampling.constraints import BaseConstraint
 
 
@@ -16,6 +18,64 @@ class SamplingError(Exception):
 
     def __str__(self):
         return str(self.args) + "\n" + str(self.kwargs)
+
+class DetectStep(object):
+
+    pstr = "DetectStep> Ecut = {:8.3g}, naccept = {:3d}, nreject ={:4d}, stepsize = {:8.3g}"
+
+    def __init__(self, sampler, stepsize=1.0, nsteps=10, nadapt=20,
+                 acc_ratio=0.5, step_factor=1.2, frequency=50, debug=False):
+
+        self.sampler = sampler
+
+        # Variables for setting adaptive stepsize
+        self.nsteps = nsteps
+        self.nadapt = nadapt
+
+        self.stepsize = stepsize
+        self.step_factor = step_factor
+        self.frequency = frequency
+        self.acc_ratio = acc_ratio
+
+        self.rel_ratio = self.acc_ratio/(1. - self.acc_ratio)
+        self.factor_step = self.step_factor**(1./self.frequency)
+
+        self.debug = debug
+
+    def detect(self, Ecut, coords, stepsize=None, nsteps=None, nadapt=None):
+
+        stepsize = self.stepsize if stepsize is None else stepsize
+        nsteps = self.nsteps if nsteps is None else nsteps
+        nadapt = self.nadapt if nadapt is None else nadapt
+
+        totaccept = 0
+        totreject = 0
+
+        newcoords = np.array(coords)
+
+        for i in xrange(nadapt):
+            try:
+                newcoords, Enew, naccept, nreject = \
+                    self.sampler.new_point(Ecut, coords, nsteps=nsteps,
+                                           stepsize=stepsize)
+
+            except SamplingError as e:
+                naccept = e.kwargs['naccept']
+                nreject = e.kwargs['nreject']
+                if self.debug:
+                    print 'DetectStep> warning: sampling failed'
+
+            totaccept += naccept
+            totreject += nreject
+
+            stepsize *= self.factor_step ** (naccept - self.rel_ratio*nreject)
+
+            if self.debug:
+                print self.pstr.format(Ecut, naccept, nreject, stepsize)
+
+        return stepsize, newcoords, Enew, totaccept, totreject
+
+    __call__ = detect
 
 class BaseSampler(object):
     """
@@ -48,6 +108,15 @@ class BaseSampler(object):
                     print e
 
         return newreplicas
+
+    def _fixConstraint(self, coords, **kwargs):
+        coords = np.array(coords) # Make a copy
+        conpot = self.constraint.getGlobalPotential(coords)
+        disp = np.zeros(3)
+        res = lbfgs_cpp(disp, conpot, **kwargs)
+        pos = coords.reshape(-1,3)
+        pos += res.coords[None,:]
+        return coords
 
 class ConstrainedMCSampler(BaseSampler):
 
@@ -187,8 +256,6 @@ class MCSampler(BaseSampler):
 
         return newcoords, Enew, niter, ntries
 
-
-
 class GalileanSampler(BaseSampler):
 
     pstr = "HMC  > nsteps  ={:4d}, nreject ={:4d}, E    ={:10.5g}, stepsize ={:10.5g}"
@@ -197,12 +264,22 @@ class GalileanSampler(BaseSampler):
                  nsteps=100, stepsize=0.1, acc_ratio=0.5, factor=0.2,
                  minstep=1e-5, maxstep=1.0, maxreject=1000, adaptive=True,
                  debug=False, searchratio=1.5, maxdepth=10,
+                 fixConstraint=False,
                  armijo=False, armijo_c1=1e-4, armijo_c2=0.9, armijo_s=2):
 
         self.pot = pot
         self.constraint = BaseConstraint() if constraint is None else constraint
 
         self.niter = 0
+
+        if callable(fixConstraint):
+            self.fixConstraint = fixConstraint
+        elif fixConstraint:
+            self.fixConstraint = self._fixConstraint
+        else:
+            def not_implemented(*arg, **kwargs):
+                raise NotImplementedError
+            self.fixConstraint = not_implemented
 
         self.nsteps = nsteps
         self.maxreject = maxreject
@@ -477,8 +554,12 @@ class GalileanSampler(BaseSampler):
 
         return newcoords, Enew, nsteps, nreject
 
+
+
+
+
 class GMCSampler(GalileanSampler):
-    pstr = "HMC  > nsteps  ={:4d}, nreject ={:4d}, E    ={:10.5g}, stepsize ={:10.5g}"
+    pstr = "GMC  > nsteps  ={:4d}, nreject ={:4d}, E    ={:10.5g}, stepsize ={:10.5g}"
     testinitial = True
 
     def new_point(self, Ecut, coords, nsteps=None, stepsize=None, depth=0):
@@ -507,9 +588,12 @@ class GMCSampler(GalileanSampler):
                     "Starting energy higher than cutoff",
                     Estart=Estart, Ecut=Ecut)
             if Econ > 0:
-                raise SamplingError(
-                    "Starting configuration doesn't satisfy constraint",
-                    Estart=Estart, Econstraint=Econ)
+                try:
+                    newcoords = self.fixConstraint(newcoords)
+                except NotImplementedError:
+                    raise SamplingError(
+                        "Starting configuration doesn't satisfy constraint",
+                        Estart=Estart, Econstraint=Econ)
 
         p = self.gen_p(newcoords, stepsize)
         testcoords = np.empty_like(newcoords)
@@ -909,7 +993,7 @@ if __name__ == "__main__":
     from pele.systems import LJCluster
     from pele.optimize import lbfgs_cpp
     from nestedbasinsampling.constraints import HardShellConstraint
-    from nestedbasinsampling.random import random_structure
+    from nestedbasinsampling.takestep import random_structure
     from nestedbasinsampling.nestedoptimization import AdaptiveNestedOptimizer
 
     import matplotlib.pyplot as plt

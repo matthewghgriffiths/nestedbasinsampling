@@ -93,14 +93,16 @@ class Minimum(Base):
         if isinstance(m, Minimum):
             assert m.id() is not None
             return self.id() == m.id()
+        elif isinstance(m, Replica):
+            return False
         else:
             return self.id() == m
 
     def __hash__(self):
-        _id = self.id()
-        assert id is not None
-        _id = hash(self.energy * _id) ## needed to differentiate from Replica
-        return _id
+        #_id = self.id()
+        #assert id is not None
+        #_id = self.energy ## needed to differentiate from Replica
+        return self.energy + self.coords.sum()
 
 class Replica(Base):
     """
@@ -142,7 +144,8 @@ class Replica(Base):
 
     energy = Column(Float)
     stepsize = Column(Float)
-    # deferred means the object is loaded on demand, that saves some time / memory for huge graphs
+    # deferred means the object is loaded on demand, that saves some time /
+    # memory for huge graphs
     coords = deferred(Column(PickleType))
     '''coordinates of the minimum'''
     invalid = Column(Integer)
@@ -150,42 +153,33 @@ class Replica(Base):
     user_data = deferred(Column(PickleType))
     """this can be used to store information about the replica"""
 
-    _minimum_id = Column(Integer, ForeignKey('tbl_minima._id'))
-    minimum = relationship("Minimum",
-                            primaryjoin="Minimum._id==Replica._minimum_id")
-    '''first minimum which connects to transition state'''
-
-    def __init__(self, energy, coords, minimum=None, stepsize=None):
+    def __init__(self, energy, coords, stepsize=None):
         self.energy = energy
         self.coords = np.copy(coords) if coords is not None else coords
         self.stepsize = stepsize
 
         self.invalid = False
 
-        if minimum is not None:
-            self.addMinimum(minimum)
-
-    def addMinimum(self, minimum):
-        self._minimum_id = minimum.id()
-        self.minimum = minimum
-
     def id(self):
         """return the sql id of the object"""
         return self._id
 
-    def __eq__(self, m):
-        """m can be integer or Minima object"""
+    def __eq__(self, replica):
+        """m can be integer or Replica object"""
         assert self.id() is not None
-        if isinstance(m, Minimum):
-            assert m.id() is not None
-            return self.id() == m.id()
+        #if isinstance(replica, Replica):
+        if type(replica) is Replica:
+            assert replica.id() is not None
+            return self.id() == replica.id()
+        #elif isinstance(replica, Minimum):
+        #    return False
         else:
-            return self.id() == m
+            return self.id() == replica
 
     def __hash__(self):
         _id = self.id()
         assert id is not None
-        _id = hash(self.energy * _id) + _id ## needed to differentiate from Minimum
+        _id = hash(self.energy) ## needed to differentiate from Minimum
         return _id
 
 class Run(Base):
@@ -201,6 +195,7 @@ class Run(Base):
     parent : Replica
     child : Replica
     volume : float, optional
+    stored : numpy array, optional
     configs : numpy array, optional
     stepsizes : numpy array, optional
 
@@ -227,10 +222,11 @@ class Run(Base):
     _id = Column(Integer, primary_key=True)
     volume = Column(Float)
 
-    # deferred means the object is loaded on demand, that saves some time / memory for huge graphs
+    # deferred means the object is loaded on demand, that saves some time /
+    # memory for huge graphs
     Emax = deferred(Column(PickleType))
     nlive = deferred(Column(PickleType))
-    
+
     stored = deferred(Column(PickleType))
     configs = deferred(Column(PickleType))
     stepsizes = deferred(Column(PickleType))
@@ -251,19 +247,31 @@ class Run(Base):
     user_data = deferred(Column(PickleType))
     """this can be used to store information about the nested sampling run"""
 
-    def __init__(self, Emax, nlive, parent, child, volume=1., 
+    def __init__(self, Emax, nlive, parent, child, volume=1.,
                  stored=None, configs=None, stepsizes=None):
 
         self.Emax = np.array(Emax)
-        self.nlive = np.array(nlive)
+        self.nlive = np.array(nlive, dtype=int)
         self.volume = volume
 
-        self.parent = parent
-        self.child = child
+        if parent is not None:
+            self._parent_id = parent.id()
+            self.parent = parent
+        if child is not None:
+            self._child_id = child.id()
+            self.child = child
 
-        self.stored = np.array([]) if stored is None else np.array(stored)
-        self.configs = None if configs is None else np.array(configs)
-        self.stepsizes = None if stepsizes is None else np.array(stepsizes)
+        self.configs = np.array([]) if configs is None else np.array(configs)
+        self.stepsizes = np.array([]) if stepsizes is None else np.array(stepsizes)
+
+        if stored is not None:
+            self.stored = np.array(stored)
+        elif len(self.configs) == len(self.Emax):
+            if len(self.stepsizes):
+                assert len(self.configs) == len(self.stepsizes)
+            self.stored = np.arange(len(self.Emax))
+        else:
+            self.stored = np.array([], dtype=int)
 
         self.invalid = False
 
@@ -281,10 +289,7 @@ class Run(Base):
             return self.id() == run
 
     def __hash__(self):
-        _id = self.id()
-        assert id is not None
-        _id = hash(self.Emax[0] * _id) ## needed to differentiate from Path
-        return _id
+        return hash(self.Emax.sum())
 
 
 class Path(Base):
@@ -297,7 +302,7 @@ class Path(Base):
     energy : float
     parent : Replica
     child : Replica or Minimum
-    
+
     stored : numpy array
     energies : numpy array, optional
     configs : numpy array, optional
@@ -313,7 +318,7 @@ class Path(Base):
         The Replica that the nested sampling run finished at
     childMinimum : Minimum
         The Minimum the minimisation finishes at
-        
+
     energies : numpy array, optional
         List of energies visted by the path
     configs : numpy array, optional
@@ -321,7 +326,9 @@ class Path(Base):
     """
     __tablename__ = 'tbl_path'
     _id = Column(Integer, primary_key=True)
+
     energy = Column(Float)
+    childE = Column(Float)
 
     # deferred means the object is loaded on demand, that saves some time / memory for huge graphs
     energies = deferred(Column(PickleType))
@@ -336,7 +343,7 @@ class Path(Base):
     childReplica = relationship("Replica",
                             primaryjoin="Replica._id==Path._childReplica_id")
     """The replica associated with the end of the path"""
-    
+
     _childMinimum_id = Column(Integer, ForeignKey('tbl_minima._id'))
     childMinimum = relationship("Minimum",
                             primaryjoin="Minimum._id==Path._childMinimum_id")
@@ -352,16 +359,40 @@ class Path(Base):
         self.energy = np.array(energy)
 
         self.parent = parent
-        if type(child) is Minimum:
-            self.childMinimum = child
-        elif type(child) is Replica:
-            self.childReplica = child
 
-        self.energies = None if energies is None else np.array(configs)
-        self.configs  = None if configs is None else np.array(stepsizes)
+        self.child = child
+#        if type(child) is Minimum:
+#            self._childMinimum_id = child.id()
+#            self.childMinimum = child
+#        elif type(child) is Replica:
+#            self._childReplica_id = child.id()
+#            self.childReplica = child
+#
+#        self.childE = child.energy
+
+        self.energies = np.array([]) if energies is None else np.array(energies)
+        self.configs  = np.array([]) if configs is None else np.array(configs)
 
         self.invalid = False
-        
+
+    @property
+    def child(self):
+        if self.childMinimum is not None:
+            return self.childMinimum
+        else:
+            return self.childReplica
+
+    @child.setter
+    def child(self, child):
+        if type(child) is Minimum:
+            self._childMinimum_id = child.id()
+            self.childMinimum = child
+        elif type(child) is Replica:
+            self._childReplica_id = child.id()
+            self.childReplica = child
+
+        self.childE = child.energy
+
     def id(self):
         """return the sql id of the object"""
         return self._id
@@ -376,12 +407,9 @@ class Path(Base):
             return self.id() == m
 
     def __hash__(self):
-        _id = self.id()
-        assert id is not None
-        _id = hash(self.energy * _id) + _id ## needed to differentiate from Path
-        return _id
+        return (self.energy + self.childE)/2
 
-        
+
 
 class TransitionState(Base):
     """Transition state object
@@ -522,6 +550,7 @@ class SystemProperty(Base):
     def __init__(self, property_name):
         self.property_name = property_name
 
+    @property
     def name(self):
         return self.property_name
 
@@ -532,6 +561,7 @@ class SystemProperty(Base):
         values = dict([(k,v) for k,v in values.iteritems() if v is not None])
         return values
 
+    @property
     def value(self):
         """return the property value"""
         actual_values = [v for v in self._values().values() if v is not None]
@@ -544,9 +574,31 @@ class SystemProperty(Base):
             return actual_values
         return None
 
+    @value.setter
+    def value(self, value):
+        if isinstance(value, int):
+            dtype = "int"
+        elif isinstance(value, float):
+            dtype = "float"
+        elif isinstance(value, basestring):
+            dtype = "string"
+        else:
+            dtype = "pickle"
+
+        if dtype == "string":
+            self.string_value = value
+        elif dtype == "int":
+            self.int_value = value
+        elif dtype == "float":
+            self.float_value = value
+        elif dtype == "pickle":
+            self.pickle_value = value
+        else:
+            raise ValueError('dtype must be one of "int", "float", "string", "pickle", or None')
+
     def item(self):
         """return a tuple of (name, value)"""
-        return self.name(), self.value()
+        return self.name, self.value
 
 #Index('idx_runs', Run.__table__.c._parent_id, Run.__table__.c._child_id)
 Index('idx_transition_states', TransitionState.__table__.c._minimum1_id,
@@ -627,7 +679,7 @@ class MinimumAdder(object):
         self.db.session.commit()
 
 def _compare_properties(prop, v2):
-    v1 = prop.value()
+    v1 = prop.value
     try:
         return bool(v1 == v2)
     except Exception:
@@ -785,13 +837,13 @@ class Database(object):
         if _schema_version != schema:
             raise IOError("database schema outdated, current (newest) version: "
                           "%d (%d). Please use migrate_db.py in pele/scripts to update database"%(schema, _schema_version))
-                          
+
     def paths(self):
         return self.session.query(Path).all()
-    
-    def addPath(self, energy, parent, child, 
+
+    def addPath(self, energy, parent, child,
                 energies=None, configs=None, commit=True):
-                
+
         self.lock.acquire()
 
         configs = None if configs is None else np.asanyarray(configs)
@@ -807,12 +859,12 @@ class Database(object):
         self.on_path_added(new)
 
         return new
-        
+
     def get_path(self, pathid):
         """ returns nested sampling run corresponding to that id """
         return  self.session.query(Path).get(pathid)
 
-    def update_path(self, path, energy, parent, child, 
+    def update_path(self, path, energy, parent, child,
                     energies=None, configs=None, commit=True):
         """
         Parameters
@@ -847,12 +899,12 @@ class Database(object):
 
     def path_adder(self, interval=None):
         interval = self.commit_interval if interval is None else interval
-        return IntervalCommit(self, self.add_path, commit_interval=interval)
+        return IntervalCommit(self.addPath, self, commit_interval=interval)
 
     def runs(self):
         return self.session.query(Run).all()
 
-    def addRun(self, Emax, Nlive, parent, child, volume=1., 
+    def addRun(self, Emax, Nlive, parent, child, volume=1.,
                stored=None, configs=None, stepsizes=None, commit=True):
         """add a new minimum to database
 
@@ -878,7 +930,7 @@ class Database(object):
         self.lock.acquire()
 
         configs = None if configs is None else np.asanyarray(configs)
-        new = Run(Emax, Nlive, parent, child, volume=volume, 
+        new = Run(Emax, Nlive, parent, child, volume=volume,
                   stored=stored, configs=configs, stepsizes=stepsizes)
 
         self.session.add(new)
@@ -934,9 +986,15 @@ class Database(object):
 
         return run
 
+    def removeRun(self, run, commit=True):
+        self.session.delete(run)
+        if commit:
+            self.session.commit()
+        self.on_run_removed(run)
+
     def run_adder(self, interval=None):
         interval = self.commit_interval if interval is None else interval
-        return IntervalCommit(self, self.add_run, commit_interval=interval)
+        return IntervalCommit(self.addRun, self, commit_interval=interval)
 
     def _highest_energy_minimum(self):
         """return the minimum with the highest energy"""
@@ -1048,11 +1106,11 @@ class Database(object):
         """return the minimum with a given id"""
         return self.session.query(Minimum).get(mid)
 
-    def addReplica(self, energy, coords, minimum=None, commit=True, **kwargs):
+    def addReplica(self, energy, coords, commit=True, stepsize=None):
 
         self.lock.acquire()
 
-        replica = Replica(energy, coords, minimum, **kwargs)
+        replica = Replica(energy, coords, stepsize=None)
         self.session.add(replica)
 
         if commit:
@@ -1065,7 +1123,7 @@ class Database(object):
 
     def replica_adder(self, interval=None):
         interval = self.commit_interval if interval is None else interval
-        return IntervalCommit(self, self.addReplica, commit_interval=interval)
+        return IntervalCommit(self.addReplica, self, commit_interval=interval)
 
     def replicas(self):
         return self.session.query(Replica).all()
@@ -1261,7 +1319,7 @@ class Database(object):
             ts.minimum2 = min1
             if ts.minimum1.id() > ts.minimum2.id():
                 ts.minimum1, ts.minimum2 = ts.minimum2, ts.minimum1
-                
+
         candidates = self.session.query(Path).\
             filter(Path.childMinimum == min2)
         for path in candidates:
@@ -1349,27 +1407,29 @@ class Database(object):
                     raise RuntimeError("property %s already exists and the value %s does not compare equal to the new value." % (new.item(), value))
                 print "warning: overwriting old property", new.item()
 
-        if dtype is None:
-            # try to determine type of the value
-            if isinstance(value, int):
-                dtype = "int"
-            elif isinstance(value, float):
-                dtype = "float"
-            elif isinstance(value, basestring):
-                dtype = "string"
-            else:
-                dtype = "pickle"
+        new.value = value
 
-        if dtype == "string":
-            new.string_value = value
-        elif dtype == "int":
-            new.int_value = value
-        elif dtype == "float":
-            new.float_value = value
-        elif dtype == "pickle":
-            new.pickle_value = value
-        else:
-            raise ValueError('dtype must be one of "int", "float", "string", "pickle", or None')
+#        if dtype is None:
+#            # try to determine type of the value
+#            if isinstance(value, int):
+#                dtype = "int"
+#            elif isinstance(value, float):
+#                dtype = "float"
+#            elif isinstance(value, basestring):
+#                dtype = "string"
+#            else:
+#                dtype = "pickle"
+#
+#        if dtype == "string":
+#            new.string_value = value
+#        elif dtype == "int":
+#            new.int_value = value
+#        elif dtype == "float":
+#            new.float_value = value
+#        elif dtype == "pickle":
+#            new.pickle_value = value
+#        else:
+#            raise ValueError('dtype must be one of "int", "float", "string", "pickle", or None')
 
         self.session.add(new)
         if commit:
@@ -1428,7 +1488,7 @@ if __name__ == "__main__":
     r1 = db.addReplica(1., np.random.random((100,31*3)))
     r2 = db.addReplica(0., np.random.random((100,31*3)))
     m = db.addMinimum(-1., np.random.random((100,31*3)))
-    
+
     run = db.addRun([0.,1.],[1,1],r1,r2)
     path1 = db.addPath(1., r1, r2)
     path2 = db.addPath(0., r2, m)

@@ -19,6 +19,53 @@ class BaseConstraint(BasePotential):
     def getEnergyGradient(self, coords):
         return self.getEnergy(coords), self.getGradient(coords)
 
+    def getGlobalPotential(self, coords):
+        return GlobalConstraint(self, coords)
+
+class GlobalConstraint(BasePotential):
+
+    def __init__(self, constraint, coords):
+        self.constraint = constraint
+        self.coords = np.asanyarray(coords).reshape(-1,3)
+
+    def getEnergy(self, disp):
+        coords = (self.coords + np.asanyarray(disp)[None,:]).ravel()
+        return self.constraint.getEnergy(coords)
+
+    def getGradient(self, disp):
+        coords = (self.coords + np.asanyarray(disp)[None,:]).ravel()
+        G = self.constraint.getGradient(coords)
+        g = G.reshape(-1,3).sum(0)
+        return g
+
+    def getEnergyGradient(self, disp):
+        coords = (self.coords + np.asanyarray(disp)[None,:]).ravel()
+        E, G = self.constraint.getEnergyGradient(coords)
+        g = G.reshape(-1,3).sum(0)
+        return E, g
+
+class CombinedPotConstraint(BasePotential):
+
+    def __init__(self, pot, constraint, factor=1.):
+
+        self.pot = pot
+        self.constraint = constraint
+        self.factor = factor
+
+    def getEnergy(self, coords):
+        return (self.pot.getEnergy(coords) +
+                self.factor * self.constraint.getEnergy(coords))
+
+    def getGradient(self, coords):
+        return (self.pot.getGradient(coords) +
+                self.factor * self.constraint.getGradient(coords))
+
+    def getEnergyGradient(self, coords):
+        E, G = self.pot.getEnergyGradient(coords)
+        Econ, Gcon = self.constraint.getEnergyGradient(coords)
+        return E+self.factor*Econ, G+self.factor*Gcon
+
+
 class HardShellConstraint(BaseConstraint):
 
     def __init__(self, radius, ndim=3):

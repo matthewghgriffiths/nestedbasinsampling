@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 
-import numpy as np
+from collections import defaultdict
 
+import numpy as np
 from pele.optimize import lbfgs_cpp
 
 from nestedbasinsampling.samplers import GMCSampler, SamplingError
@@ -26,6 +27,43 @@ class BasinPotential(object):
         if self.database is not None:
             self.min = self.storage(self.res)
         return basinE
+
+class RecordMinimization(object):
+
+    def __init__(self, pot, minimizer=lbfgs_cpp, **kwargs):
+
+        self.pot = pot
+        self.minimizer = minimizer
+
+        events = kwargs.get('events', [])
+        events.append(self.store)
+        kwargs['events'] = events
+        self.min_kw = kwargs
+
+    def __call__(self, coords, **kwargs):
+        self.store = defaultdict(list)
+
+        new_kw = kwargs.copy()
+        if 'events' in new_kw:
+            new_kw['events'] += self.min_kw['events']
+        dict_update_keep(new_kw, self.min_kw)
+
+        res = self.minimizer(coords, pot=self.pot, **new_kw)
+
+        if res is None:
+            raise Exception
+
+        for key, item in self.store.iteritems():
+            if hasattr(res, key):
+                setattr(res, key+'_s', np.array(item))
+            else:
+                setattr(res, key, np.array(item))
+        return res
+
+    def store(self, **kwargs):
+        for key, item in kwargs.iteritems():
+            self.store[key].append(item)
+
 
 class NestedOptimizer(object):
 
@@ -65,7 +103,7 @@ class NestedOptimizer(object):
     def __init__(self, X, pot, sampler,
                  tol=1e-1, alternate_stop_criterion=None,
                  events=None, iprint=-1, nsteps=10000, debug=False,
-                 energy=None, gradient=None, store_configs=True,
+                 energy=None, gradient=None, store_configs=False,
                  quench=lbfgs_cpp, quenchtol=1e-6, quench_kw={}):
 
         self.X = np.array(X)        # Copy initial coordinates
@@ -112,9 +150,9 @@ class NestedOptimizer(object):
         self.result.initialcoords = self.Xi
         self.result.message = []
 
-        self.Emax = [self.E]
+        self.Emax = []
         if self.store_configs:
-            self.configs = [self.X.copy()]
+            self.configs = []
 
         self.quench = quench
         self.quenchtol = quenchtol
@@ -234,7 +272,7 @@ class AdaptiveNestedOptimizer(NestedOptimizer):
     def __init__(self, X, pot, sampler,
                  tol=1e-1, alternate_stop_criterion=None,
                  events=None, iprint=-1, nsteps=10000, debug=False,
-                 energy=None, gradient=None, store_configs=True,
+                 energy=None, gradient=None, store_configs=False,
                  stepsize=None, acc_ratio=0.5, step_factor=1.1, frequency=100,
                  quench=lbfgs_cpp, quenchtol=1e-6, quench_kw={}):
 
@@ -295,10 +333,10 @@ class AdaptiveNestedOptimizer(NestedOptimizer):
         self.result.initialcoords = self.Xi
         self.result.message = []
 
-        self.Emax = [self.E]
+        self.Emax = []
         if self.store_configs:
-            self.configs = [self.X.copy()]
-            self.stepsizes = [self.stepsize]
+            self.configs = []
+            self.stepsizes = []
 
         self.quench = quench
         self.quenchtol = quenchtol
@@ -341,7 +379,8 @@ class AdaptiveNestedOptimizer(NestedOptimizer):
             self.printState(False)
 
             for event in self.events:
-                event(coords=self.X, energy=self.E, rms=self.rms)
+                event(coords=self.X, energy=self.E, rms=self.rms,
+                      stepsize=self.stepsize)
 
             if self.initial:
                 self.isteps = naccept
@@ -403,7 +442,7 @@ if __name__  == "__main__":
 
     from nestedbasinsampling.constraints import HardShellConstraint
     from nestedbasinsampling.samplers import MCSampler
-    from nestedbasinsampling.random import random_structure
+    from nestedbasinsampling.takestep import random_structure
 
     import matplotlib.pyplot as plt
     from plottingfuncs.plotting import ax3d

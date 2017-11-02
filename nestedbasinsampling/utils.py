@@ -186,7 +186,20 @@ def dict_update_keep(toupdate, update):
     present in toupdate
     """
     toupdate.update(pair for pair in update.iteritems()
-                    if pair[0] not in toupdate)
+                    if pair[0] not in toupdate or toupdate[pair[0]] is None)
+    return toupdate
+
+def dict_update_copy(primary, update):
+    """
+    updates dict toupdate with values from dict update, except if key already
+    present in toupdate
+
+    does not modify primary
+    """
+    toupdate = dict()
+    toupdate.update(update)
+    toupdate.update(pair for pair in primary.iteritems()
+                    if pair[1] is not None or pair[0] not in update)
     return toupdate
 
 def call_counter(func):
