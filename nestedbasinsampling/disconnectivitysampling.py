@@ -11,18 +11,13 @@ from pele.optimize import lbfgs_cpp, LBFGS_CPP
 
 from nestedbasinsampling.utils import \
     dict_update_keep, dict_update_copy, weighted_choice, iter_minlength
-from nestedbasinsampling.samplers import \
-    SamplingError, GMCSampler, DetectStep
-from nestedbasinsampling.constraints import BaseConstraint
-from nestedbasinsampling.nestedoptimization import \
-    BasinPotential, AdaptiveNestedOptimizer, RecordMinimization
-from nestedbasinsampling.disconnectivitydatabase import \
-    Minimum, Replica, Run, Database
-from nestedbasinsampling.disconnectivitygraphs import \
-    ReplicaGraph, BasinGraph, SuperBasin, FunctionGraph
-from nestedbasinsampling.stats import CDF, AndersonDarling, AgglomerativeCDFClustering
-from nestedbasinsampling.nestedsampling import \
-    findRunSplit, joinRuns, combineRuns
+from nestedbasinsampling.samplers import GMCSampler, DetectStep
+from nestedbasinsampling.structure.constraints import BaseConstraint
+from nestedbasinsampling.optimize import AdaptiveNestedOptimizer, RecordMinimization
+from nestedbasinsampling.storage import Minimum, Replica, Run, Database
+from nestedbasinsampling.graphs import ReplicaGraph, BasinGraph, SuperBasin, FunctionGraph
+from nestedbasinsampling.random.stats import CDF, AndersonDarling, AgglomerativeCDFClustering
+from nestedbasinsampling.nestedsampling import findRunSplit, combineRuns
 
 class DisconnectivitySystem(object):
     """
@@ -74,9 +69,6 @@ class DisconnectivitySystem(object):
 
     def get_minimizer(self):
         return self._quench
-
-    def get_basinpotential(self):
-        return BasinPotential(self.pot, quench=self.get_minimizer())
 
 class DisconnectivitySampler(object):
     """ This class controls overall the sampling of the disconnectivity graph
@@ -456,9 +448,9 @@ class DisconnectivitySampler(object):
 import seaborn as sns
 
 from pele.systems import LJCluster
-from nestedbasinsampling.constraints import HardShellConstraint, CombinedPotConstraint
-from nestedbasinsampling.takestep import random_structure
-from nestedbasinsampling.alignment import CompareStructures
+from nestedbasinsampling.structure.constraints import HardShellConstraint, CombinedPotConstraint
+from nestedbasinsampling.random.takestep import random_structure
+from nestedbasinsampling.structure.alignment import CompareStructures
 
 import matplotlib.pyplot as plt
 from plottingfuncs.plotting import ax3d
@@ -533,6 +525,7 @@ m = repGraph.Minimum(energy, coords)
 dE = 0.5
 
 Ecut = energy + dE
+
 
 raise
 
