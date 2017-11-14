@@ -618,19 +618,19 @@ class GMCSampler(GalileanSampler):
 
                 if Eaccept and not constraint:
                     n = Gcon/np.linalg.norm(Gcon)
-                    testcoords += p - 2. * n * n.ravel().dot(p.ravel())
                     ncon += 1
                 elif constraint and not Eaccept:
                     n = Gnew/np.linalg.norm(Gnew)
-                    testcoords += p - 2. * n * n.ravel().dot(p.ravel())
                     nE += 1
                 else:
                     n1 = Gnew/np.linalg.norm(Gnew)
                     n2 = Gcon/np.linalg.norm(Gcon)
                     n = n1 + n2
                     n /= np.linalg.norm(n)
-                    testcoords += p - 2. * n * n.ravel().dot(p.ravel())
                     nEcon += 1
+
+                p -= 2. * n * n.ravel().dot(p.ravel())
+                testcoords += p
 
                 Econ = self.constraint.getEnergy(testcoords)
                 Enew = self.pot.getEnergy(testcoords)
@@ -865,13 +865,13 @@ class AdaptiveThermalSampler(ThermalSampler):
                 self.temperature, str(self.acceptstep),
                 self.stepsize, str(self.newmin), )
 
-if __name__ == "__main__" and False:
+if __name__ == "__main__":
 
     import matplotlib.pyplot as plt
     from pele.potentials import BasePotential
 
-    from nestedbasinsampling.takestep import TakestepHyperSphere
-    from nestedbasinsampling.random import vector_random_uniform_hypersphere
+    from nestedbasinsampling.takestep import (
+        TakestepHyperSphere, vector_random_uniform_hypersphere)
     from nestedbasinsampling.utils import hyperspherevol
 
     class MyPot(BasePotential):
@@ -944,6 +944,8 @@ if __name__ == "__main__" and False:
     plt.plot(grs**ndim - np.linspace(0,1,N,False))
     plt.plot(mcrs**ndim - np.linspace(0,1,N,False))
 
+    raise
+
     ndim = 2
     vol = hyperspherevol(ndim, R)
 
@@ -989,7 +991,8 @@ if __name__ == "__main__" and False:
     plt.plot(mcrs**ndim - np.linspace(0,1,N,False))
 
 
-if __name__ == "__main__":
+
+if __name__ == "__main__" and False:
     from pele.systems import LJCluster
     from pele.optimize import lbfgs_cpp
     from nestedbasinsampling.constraints import HardShellConstraint

@@ -2,6 +2,7 @@
 
 import copy
 from bisect import bisect_left, bisect_right
+from itertools import islice
 
 import inspect
 from weakref import WeakSet, WeakKeyDictionary
@@ -11,6 +12,19 @@ from scipy.special import gamma
 
 def hyperspherevol(n, R=1.):
     return np.pi**(0.5*n) * R**n / gamma(0.5*n + 1)
+
+def weighted_choice(ps):
+    cdf = np.r_[0.,ps].cumsum()
+    cdf /= cdf[-1]
+    rand = np.random.rand()
+    return cdf.searchsorted(rand)-1
+
+def iter_minlength(iterable, minlength):
+    try:
+        islice(iterable, minlength-1, None).next()
+        return True
+    except StopIteration:
+        return False
 
 class Signal(object):
     """ class for signal slot concept

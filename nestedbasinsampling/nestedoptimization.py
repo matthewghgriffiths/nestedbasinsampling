@@ -341,8 +341,7 @@ class AdaptiveNestedOptimizer(NestedOptimizer):
         self.quench = quench
         self.quenchtol = quenchtol
         self.quenchkw = quench_kw
-        dict_update_keep(self.quenchkw,
-                         dict(events=self.events, iprint=self.iprint))
+        dict_update_keep(self.quenchkw, dict(iprint=self.iprint))
 
     def update_stepsize(self, naccept, nreject):
         self.stepsize *= self.factor_step ** (naccept - self.rel_ratio * nreject)
@@ -395,6 +394,7 @@ class AdaptiveNestedOptimizer(NestedOptimizer):
             self.update_stepsize(naccept, nreject)
             if self.debug:
                 print "NOPT > Sampling error, updating stepsize = {:8.3g}".format(self.stepsize)
+                print 'initial stepsize', self.firststep, self.iter_number
 
     def get_result(self):
         res = self.result

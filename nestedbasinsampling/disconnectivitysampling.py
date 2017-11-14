@@ -4,14 +4,13 @@ from itertools import chain, izip
 from random import choice, seed, sample
 
 import numpy as np
-from scipy.stats import anderson_ksamp, ks_2samp
 
 import networkx as nx
-from networkx.algorithms.traversal import bfs_successors, bfs_edges
 
 from pele.optimize import lbfgs_cpp, LBFGS_CPP
 
-from nestedbasinsampling.utils import dict_update_keep, dict_update_copy
+from nestedbasinsampling.utils import \
+    dict_update_keep, dict_update_copy, weighted_choice, iter_minlength
 from nestedbasinsampling.samplers import \
     SamplingError, GMCSampler, DetectStep
 from nestedbasinsampling.constraints import BaseConstraint
@@ -20,7 +19,7 @@ from nestedbasinsampling.nestedoptimization import \
 from nestedbasinsampling.disconnectivitydatabase import \
     Minimum, Replica, Run, Database
 from nestedbasinsampling.disconnectivitygraphs import \
-    ReplicaGraph, BasinGraph, SuperBasin
+    ReplicaGraph, BasinGraph, SuperBasin, FunctionGraph
 from nestedbasinsampling.stats import CDF, AndersonDarling, AgglomerativeCDFClustering
 from nestedbasinsampling.nestedsampling import \
     findRunSplit, joinRuns, combineRuns
@@ -101,12 +100,12 @@ class DisconnectivitySampler(object):
     """
 
     sampleMinStr = \
-        "DIS > Sampling minima, Ecut = {:8.4g}, minE = {:8.4g}, logF = {:8.4g}"
+        "NBS > Sampling minima, Ecut = {:8.4g}, minE = {:8.4g}, logF = {:8.4g}"
     branchStr = \
-        "DIS > Sampling branches, Esplit = {:8.4g}, sig = {:8.4g}"
+        "NBS > Sampling branches, Esplit = {:8.4g}, sig = {:8.4g}"
 
     def __init__(self, pot, quench, sampler, repGraph=None, basinGraph=None,
-                 reject_sig=1e-1, accept_sig=0.3, splitf=0.5,
+                 reject_sig=1e-1, accept_sig=0.3, splitf=0.5, func=None,
                  nsamples=10, nbranch=None, detectStep=None, fixConstraint=None,
                  random_config=None, debug=False):
 
@@ -116,6 +115,8 @@ class DisconnectivitySampler(object):
         self.sampler = sampler
         self.detectStep = detectStep
         self.fixConstraint = fixConstraint
+
+        self.func = func
 
         self.reject_sig = reject_sig
         self.accept_sig = accept_sig
@@ -166,9 +167,7 @@ class DisconnectivitySampler(object):
             else:
                 stepsize = replica.stepsize
 
-        # If we have already sampled from replica, then we can use those as
-        # a starting point
-        samples = self.repGraph.findSamples(replica)
+        print stepsize
 
         # Generating starting location
         if replica.coords is None: # Sample randomly
@@ -178,6 +177,10 @@ class DisconnectivitySampler(object):
                 coords = self.random_config()
                 E = self.pot.getEnergy(coords)
         else:
+            # If we have already sampled from replica, then we can use
+            # those as a starting point
+            samples = self.repGraph.findSamples(replica)
+            # Choose random starting coords from samples
             coords = choice(samples) if samples else replica.coords
             # Continue Markov Chain
             try:
@@ -185,12 +188,14 @@ class DisconnectivitySampler(object):
                     Ecut, coords, stepsize=stepsize, nsteps=nsteps)
             except SamplingError as e:
                 if self.debug:
-                    print "DIS > sampleReplica warning:",  SamplingError
+                    print "DIS > sampleReplica warning:",  e
                     print "DIS > stepsize = {:8.5g}".format(stepsize)
                 return self.sampleReplica(replica, stepsize, nsteps)
 
-
-        res = self.minimizer(coords)
+        try:
+            res = self.minimizer(coords, stepsize=stepsize)
+        except TypeError:
+            res = self.minimizer(coords)
 
         Emax = res.energy_s if hasattr(res, 'energy_s') else None
         nlive = (res.nlive if hasattr(res, 'nlive') else
@@ -205,30 +210,73 @@ class DisconnectivitySampler(object):
         m = self.Minimum(res.energy, res.coords)
         path = self.Path(child.energy, child, m)
 
-        runs, replicas = self.Run(Emax, nlive, replica, child, stored=stored,
-                                  stepsizes=stepsizes, configs=configs)
+        run = self.Run(Emax, nlive, replica, child, stored=stored,
+                       stepsizes=stepsizes, configs=configs)
 
         if self.debug:
             print self.sampleMinStr.format(Ecut, res.energy,
                                            -len(Emax)*np.log(2))
 
-        return m, runs, path, replicas
+        return m, run, path
 
-    def insertNewESplit(self, basin):
-        replica = max(self.basinGraph.getBasinBranchReplicas(basin)[0],
-                      key=lambda rep: rep.energy)
-        print replica
-        print list(self.basinGraph.genPaths(basin, replica))
-        path = min(self.basinGraph.genPaths(basin, replica),
-                       key=lambda p: p[0].energy)
-        run = repGraph.pathtoRun(path)
-        Esplit = findRunSplit(run)[0]
-        return repGraph.insertEnergySplit(Esplit)
+    def sampleBasin(self, basin, nsamples=None, stepsize=None):
 
-    def sampleBasin(self, basin, nsamples=None, nbranch=None, stepsize=None):
+        nsamples = self.nsamples if nsamples is None else nsamples
+
+        if self.basinGraph.isDangling(basin, nsamples):
+            parent = self.basinGraph.getParent(basin)
+
+            groupable = self.groupable(basin, nsamples)
+
+            if groupable:
+                siblings = self.basinGraph.getSiblings(parent, basin)
+                newbasins, agglom = self.groupBasins(siblings)
+
+                # If we have failed to group basin with other basins
+                if self.basinGraph.graph.has_node(basin):
+                    parent = self.basinGraph.getParent(basin)
+                    self.insertNewESplit(parent)
+            else:
+                # Sample other children?
+                pass
+
+        elif self.basinGraph.isSingleton(basin):
+            self.sampleBasinReplicas(basin, nsamples, stepsize)
+        else:
+            self.sampleBasinReplicas(basin, nsamples, stepsize)
+
+    def groupable(self, basin, nsamples=None):
+        """ Calculates whether more than two of the children of basin have
+        been sampled more than nsamples
+
+        Parameters
+        ----------
+        basin : SuperBasin
+            the basin we are testing the children of
+
+        Returns
+        -------
+        groupable : bool
+            whether two or more of the children can be joined
+        """
+        nsamples = self.nsamples if nsamples is None else nsamples
+        children = self.basinGraph.graph.successors(basin)
+        nsampled = sum(iter_minlength(self.basinGraph.genNextReplicas(child),
+                                      nsamples) for child in children)
+        return nsampled > 1
+
+    def sampleBasinReplicas(self, basin, nsamples=None, stepsize=None, nsteps=None):
         """
         """
+        nsamples = self.nsamples if nsamples is None else nsamples
+        for i in xrange(nsamples):
+            self.sampleReplica(choice(list(basin.replicas)),
+                               stepsize=stepsize, nsteps=nsteps)
 
+
+    def sampleBasin2(self, basin, nsamples=None, nbranch=None, stepsize=None):
+        """
+        """
         nbranch = self.nbranch if nbranch is None else nbranch
         nsamples = self.nsamples if nsamples is None else nsamples
 
@@ -264,6 +312,146 @@ class DisconnectivitySampler(object):
 
         return sampled, unsampled, Esplit
 
+    def groupBasins(self, basins):
+        """
+        """
+        basinCDFs = [reduce(lambda x,y:x+y,
+                            map(self.repGraph.getMinimaCDF, basin.replicas))
+                     for basin in basins]
+
+        agglom = AgglomerativeCDFClustering(basinCDFs)
+        # The likelihood of all the basins being the same
+        sig = agglom.significance
+
+        if sig > self.accept_sig:
+            newbasins = [self.basinGraph.mergeBasins(basins)]
+        elif sig < self.reject_sig:
+            ps, clusteri, clusters = agglom.getMaxLikelihood()
+            newbasins = [
+                self.basinGraph.mergeBasins([children[i] for i in ind])
+                for p, ind in izip(ps, clusteri) if  p > self.accept_sig]
+        else:
+            newbasins = []
+
+        return newbasins, agglom
+
+    def groupBranches(self, basin):
+        """
+        """
+        children = self.basinGraph.graph.successors(basin)
+        childCDFs = [reduce(lambda x,y:x+y,
+                            map(self.repGraph.getMinimaCDF, child.replicas))
+                     for child in children]
+
+        agglom = AgglomerativeCDFClustering(childCDFs)
+        # The likelihood of all the basins being the same
+        sig = agglom.significance
+
+        if sig > self.accept_sig:
+            newbasins = [self.basinGraph.mergeBasins(children)]
+        elif sig < self.reject_sig:
+            ps, clusteri, clusters = agglom.getMaxLikelihood()
+            newbasins = [
+                self.basinGraph.mergeBasins([children[i] for i in ind])
+                for p, ind in izip(ps, clusteri) if  p > self.accept_sig]
+        else:
+            newbasins = []
+
+        return newbasins, agglom
+
+    def insertNewESplit(self, basin):
+        """
+        """
+        edges = self.basinGraph.graph.edge[basin]
+        edge = max(edges.iteritems(), key=lambda x: x[0].energy)
+        run = edge[1]['run']
+        Esplit = findRunSplit(run)[0]
+        repGraph.insertEnergySplit(Esplit)
+        return Esplit
+
+    def identifyBranch(self, basin, minimum, stepsize=None, nsamples=None):
+        """
+        """
+        nsamples = self.nsamples if nsamples is None else nsamples
+
+        if iter_minlength(self.repGraph.graph.predecessors_iter(minimum,2)):
+            self.basinGraph.updateMinimum(minimum)
+        else:
+            # There should be only one path
+            path, = chain(*(nx.all_simple_paths(self.repGraph.graph,
+                                                rep, minimum)
+                            for rep in basin.replicas))
+            lowestreplica = path[-2]
+            lowestbasin = self.basinGraph.repdict(lowestreplica)
+
+            for i in xrange(nsamples):
+                self.sampleReplica(lowestreplica, stepsize)
+
+
+    def compareBasinPair(self, basin1, basin2):
+
+        cdf1 = self.basinGraph.getMinimaCDF(basin1)
+        cdf2 = self.basinGraph.getMinimaCDF(basin2)
+
+        if cdf1.n < self.nsamples:
+            self.sampleBasinReplicas(basin1, nsamples=self.nsamples-cdf1.n)
+            cdf1 = self.basinGraph.getMinimaCDF(basin1)
+        if cdf2.n < self.nsamples:
+            self.sampleBasinReplicas(basin2, nsamples=self.nsamples-cdf2.n)
+            cdf2 = self.basinGraph.getMinimaCDF(basin2)
+
+        sig = AndersonDarling.compareDistributions([cdf1,cdf2])[0]
+
+        while( self.accept_sig > sig > self.reject_sig):
+
+            c = cmp(cdf1.n, cdf2.n)
+            if c <= 0:
+                self.sampleBasinReplicas(basin1, nsamples=self.nsamples)
+                cdf1 = self.basinGraph.getMinimaCDF(basin1)
+            if c >= 0:
+                self.sampleBasinReplicas(basin2, nsamples=self.nsamples)
+                cdf2 = self.basinGraph.getMinimaCDF(basin2)
+
+            print c, cdf1.n, cdf2.n
+
+            sig = AndersonDarling.compareDistributions([cdf1,cdf2])[0]
+
+        return sig
+
+    def compareBasins(self, basins):
+
+        cdfs = [self.basinGraph.getMinimaCDF(basin) for basin in basins]
+
+    @property
+    def funcGraph(self):
+        """
+        """
+        if not hasattr(self, '_funcGraph'):
+            self.evalFunc()
+        elif not nx.is_isomorphic(self.basinGraph.graph,
+                                  self._funcGraph.graph):
+            self.evalFunc()
+
+        return self._funcGraph
+
+    def evalFunc(self):
+        """
+        """
+        self._funcGraph = FunctionGraph(basinGraph, func)
+        f, f2, fstd, df = self.funcGraph()
+        return f, fstd, self._funcGraph
+
+    def calcVarianceReduction(self):
+        """
+        """
+        fgraph = self.funcGraph
+        basins = fgraph.graph.nodes()
+        f = fgraph.integral
+        dfbasins = sorted(((fgraph.graph.node[b]['dsvarf']/f/f).sum(), b)
+                        for b in fgraph.graph.nodes())
+        dfs, basins = zip(*dfbasins)
+        return dfs, basins
+
 
 import seaborn as sns
 
@@ -275,11 +463,20 @@ from nestedbasinsampling.alignment import CompareStructures
 import matplotlib.pyplot as plt
 from plottingfuncs.plotting import ax3d
 
+def heatCapacityFunc(E, T=[1.], Emin=-44.):
+    T = np.atleast_1d(T)
+    E = np.atleast_1d(E)-Emin
+    ET = (E[None,:]/T[:,None])
+    return ET**2 * np.exp(-ET)
+
+Ts = np.logspace(-2,2,50)
+func = lambda E: heatCapacityFunc(E, Ts)
+
 ###############################################################################
 ###################################SETUP#######################################
 ###############################################################################
 
-natoms = 31
+natoms = 13
 system = LJCluster(natoms)
 radius =  float(natoms) ** (1. / 3)
 rand_config = lambda : random_structure(natoms, radius)
@@ -288,8 +485,9 @@ pot = system.get_potential()
 minimizer_kw = dict(tol=1e-1, alternate_stop_criterion=None,
                    events=None, iprint=-1, nsteps=10000, stepsize=0.3,
                    debug=True, quench=lbfgs_cpp, quenchtol=1e-6,
+                   step_factor=1.3, frequency=40, acc_ratio=0.8,
                    quench_kw=dict(nsteps=1000))
-sampler_kw = dict(nsteps=30, maxreject=200, debug=True, stepsize=0.1,
+sampler_kw = dict(nsteps=100, maxreject=200, debug=True, stepsize=0.1,
                   constraint=constraint, fixConstraint=True)
 disSystem = DisconnectivitySystem(pot, constraint=constraint,
                                   sampler_kw=sampler_kw, minimizer_kw=minimizer_kw,
@@ -299,11 +497,13 @@ sampler = disSystem.get_sampler(nsteps=1000, maxreject=5000, fixConstraint=True,
 detectStep = DetectStep(disSystem.get_sampler(maxreject=100), nadapt=30,
                     step_factor=1.5, stepsize=0.1, debug=False)
 compare = CompareStructures(niter=100)
+
 db = disSystem.get_database(compareMinima=compare)
 repGraph = disSystem.get_replicaGraph(db)
-quench = lbfgs_cpp # disSystem._quench
+quench = disSystem._quench # lbfgs_cpp #
 driver = DisconnectivitySampler(pot, quench, sampler, repGraph,
-                                nsamples=25, nbranch=10, detectStep=detectStep,
+                                nsamples=10, nbranch=10, detectStep=detectStep,
+                                accept_sig=0.5, reject_sig=1e-3, func=func,
                                 debug=True, random_config=rand_config)
 basinGraph = driver.basinGraph
 
@@ -312,10 +512,390 @@ basinGraph = driver.basinGraph
 ###############################################################################
 
 self = driver
+
+
+###### Finding bottom of global basin #########
+replica, basin = driver.globalReplicaBasin()
+
+
+coords = np.array([-0.54322426, -0.38203861,  0.52203412,  1.26544146,  0.4464261 ,
+       -0.32877187, -0.1064755 , -0.7742898 , -0.4522979 ,  0.40450016,
+        0.09264135, -0.98264503,  1.28655638, -0.20185368,  0.60569126,
+        0.283552  ,  1.02068545, -0.33608509,  0.36110853,  0.03219396,
+        0.09663129, -0.30217412,  0.7273169 ,  0.59385779,  0.82869275,
+        0.83867761,  0.64556041,  1.02439098, -0.66292951, -0.40059499,
+       -0.56433927,  0.26624146, -0.41242867,  0.31771689, -0.02825336,
+        1.1759076 ,  0.43866499, -0.95629744,  0.52934806])
+energy = pot.getEnergy(coords)
+
+m = repGraph.Minimum(energy, coords)
+
+dE = 0.5
+
+Ecut = energy + dE
+
+raise
+
+Ecut = -37
+
+newcoords = coords.copy()
+stepsize = self.detectStep(Ecut, coords)[0]
+ms = []
+for i in xrange(100):
+    newcoords = self.sampler.new_point(Ecut, newcoords, stepsize=stepsize)[0]
+    print pot.getEnergy(newcoords)
+    newrep = self.repGraph.Replica(Ecut, newcoords, stepsize=stepsize)
+    mnew, run, path = self.sampleReplica(newrep, stepsize=None)
+    ms.append(mnew)
+
+from collections import defaultdict
+mcount = defaultdict(int)
+for _m in ms:
+    mcount[_m.energy] += 1
+
+newcoords = coords.copy()
+stepsize = self.detectStep(Ecut, coords)[0]
+ms2 = []
+for i in xrange(100):
+    newcoords = self.sampler.new_point(Ecut, newcoords, stepsize=stepsize)[0]
+    print pot.getEnergy(newcoords)
+    newrep = self.repGraph.Replica(Ecut, newcoords, stepsize=stepsize)
+    mnew, run, path = self.sampleReplica(newrep, stepsize=None)
+    ms2.append(mnew)
+
+from collections import defaultdict
+mcount2 = defaultdict(int)
+for _m in ms2:
+    mcount2[_m.energy] += 1
+print mcount2
+
+
+
+Ecut = -35
+
+newcoords = coords.copy()
+stepsize = self.detectStep(Ecut, coords)[0]
+ms3 = []
+for i in xrange(100):
+    newcoords = self.sampler.new_point(Ecut, newcoords, stepsize=stepsize)[0]
+    print pot.getEnergy(newcoords)
+    newrep = self.repGraph.Replica(Ecut, newcoords, stepsize=stepsize)
+    mnew, run, path = self.sampleReplica(newrep, stepsize=None)
+    ms3.append(mnew)
+
+from collections import defaultdict
+mcount3 = defaultdict(int)
+for _m in ms3:
+    mcount3[_m.energy] += 1
+mcount3
+
+
+
+Ecut = -39.6
+dE = 0.1
+newcoords = m.coords.copy()
+stepsize = self.detectStep(Ecut, newcoords)[0]
+ms4 = []
+for i in xrange(100):
+    newcoords = self.sampler.new_point(Ecut, newcoords, stepsize=stepsize)[0]
+    print pot.getEnergy(newcoords)
+    newrep = self.repGraph.Replica(Ecut, newcoords, stepsize=stepsize)
+    mnew, run, path = self.sampleReplica(newrep, stepsize=None)
+    ms4.append(mnew)
+
+
+while True:
+    newcoords = self.sampler.new_point(Ecut, newcoords, stepsize=stepsize)[0]
+    print self.pot.getEnergy(newcoords)
+    newrep = self.repGraph.Replica(Ecut, newcoords, stepsize=stepsize)
+
+    mnew, run, path = self.sampleReplica(newrep, stepsize=None)
+
+    #Ecut += dE
+    i += 1
+    if not compare(mnew,m):
+        print i
+        break
+
+raise
+
+self = driver
+
+
+
+driver.sampleBasinReplicas(basin, nsamples=10)
+
+basinGraph.getMinimaCDF(basin).plot()
+
+
+connectedreplicas = ((r2 ,r1) for r1 in basin
+                     for r2 in self.repGraph.graph.successors_iter(r1))
+highestpair = max(connectedreplicas, key=lambda rs: rs[0].energy)
+
+edge = self.repGraph.graph.edge[highestpair[1]][highestpair[0]]
+run = edge['run']
+
+Emax = run.Emax
+stepsizes = run.stepsizes
+coords = highestpair[0].coords.copy()
+
+
+plt.semilogy(Emax-Emax.min())
+
+imin = 0
+imax = Emax.size-1
+
+rephi, replo = highestpair[1], highestpair[0]
+
+while(imax-imin > 1):
+    itest = (imax-imin)/2 + imin
+    Ecut = Emax[itest]
+
+    print Ecut, imin, itest, imax
+
+    if stepsizes.size == Emax.size:
+        stepsize = stepsizes[itest]
+    else:
+        stepsize = self.detectStep(Ecut, coords)[0]
+    newcoords = self.sampler.new_point(Ecut, coords, stepsize=stepsize)[0]
+
+    newrep = self.repGraph.Replica(Ecut, newcoords, stepsize=stepsize)
+
+    self.repGraph.splitReplicas(rephi, replo, [newrep])
+
+    newbasin = self.basinGraph.SuperBasin([newrep], basin)
+
+    self.sampleBasinReplicas(newbasin, nsamples=10, nsteps=200)
+
+    sig = self.compareBasinPair(basin, newbasin)
+    basin1, basin2 = basin, newbasin
+
+    cdf1 = self.basinGraph.getMinimaCDF(basin1)
+    cdf2 = self.basinGraph.getMinimaCDF(basin2)
+
+    plt.figure()
+    cdf1.plot(); cdf2.plot()
+
+    if sig < self.accept_sig:
+        replo = newrep
+        imax = itest
+    else:
+        #self.basinGraph.mergeBasins([basin,newbasin])
+        rephi = newrep
+        imin = itest
+
+    print sig
+
+    #break
+
+cdfs = [self.basinGraph.getMinimaCDF(b) for b in basinGraph.basins()]
+agglom = AgglomerativeCDFClustering(cdfs)
+agglom.plot()
+
+raise
+
+
+
+rep2, = basin2.replicas
+rep2s = set(repGraph.graph.successors_iter(rep2))
+
+rep1, = basin1.replicas
+rep1s = set(repGraph.graph.successors_iter(rep1))
+rep1s.difference_update([rep2])
+
+m2s = [m for r in rep2s for m, _ in repGraph.genConnectedMinima(r)]
+m1s = [m for r in rep1s for m, _ in repGraph.genConnectedMinima(r)]
+
+cdf1 = CDF([m.energy for m in m1s])
+cdf2 = CDF([m.energy for m in m2s])
+
+self.sampleBasinReplicas(basin1, 10)
+cdf1 = self.basinGraph.getMinimaCDF(basin1)
+self.sampleBasinReplicas(basin2, 10)
+cdf2 = self.basinGraph.getMinimaCDF(basin2)
+plt.figure()
+cdf1.plot(); cdf2.plot()
+
+
+self.sampleBasinReplicas(basin1, 100)
+cdf1 = self.basinGraph.getMinimaCDF(basin1)
+self.sampleBasinReplicas(basin2, 100)
+cdf2 = self.basinGraph.getMinimaCDF(basin2)
+plt.figure()
+cdf1.plot(); cdf2.plot()
+
+keep = cdf2._ws == np.unique(cdf2._ws)[2]
+cdf22 = CDF(cdf2._Xs[keep])
+keep = cdf2._ws == np.unique(cdf2._ws)[1]
+cdf21 = CDF(cdf2._Xs[keep])
+keep = cdf2._ws == np.unique(cdf2._ws)[0]
+cdf20 = CDF(cdf2._Xs[keep])
+
+
+
+
+
+
+driver.sampleBasinReplicas(basin,nsamples=200)
+cdf1 = driver.basinGraph.getMinimaCDF(basin)
+
+
+
+
+plt.figure()
+cdf1.plot(); cdf2.plot()
+
+cdf1.plot()
+
+
+
+
+
+raise
+
+
+
+
+
+plt.ion()
 nsamples = 10
 
-if len(db.minima()) == 0:
-    replica, basin = self.globalReplicaBasin()
+replica, basin = driver.globalReplicaBasin()
+
+replicas = list(basin.replicas)
+
+driver.sampleBasinReplicas(basin)
+
+basinGraph.updateMinima()
+basinGraph.updateMinima()
+driver.insertNewESplit(basin)
+repGraph.plot()
+
+
+#
+
+dfs, basins = driver.calcVarianceReduction()
+
+fgraph = driver.funcGraph
+f, fstd = fgraph.integral, fgraph.error
+for basin, attr in fgraph.graph.node.iteritems():
+    print basin.energy, ((attr['fstd']/f)**2).sum()
+
+for basin in fgraph.graph.nodes_iter():
+    rerror = 0.
+    node = fgraph.graph.node[basin]
+    for child in fgraph.graph.successors_iter(basin):
+        rerror += (fgraph.graph.node[child]['fstd']/f)**2
+    print basin.energy, np.mean(rerror), node['X2']/node['X']**2
+
+basin = fgraph.graph.nodes()[3]
+
+raise
+
+
+basinGraph.updateMinima()
+
+
+
+self = repGraph
+self.Esplits = np.array([-37.,-30])
+
+self.insertEnergySplit(-30)
+
+for r1, edges in self.graph.edge.items():
+    for r2, edge in edges.iteritems():
+        i1 = self.findEnergySplit(r1)
+        i2 = self.findEnergySplit(r2)
+        print r1.energy, r2.energy, i1, i2
+        if i1-i2 > 1:
+            parent, child, run = r1, r2, edge['run']
+
+
+fgraph = driver.funcGraph
+#FunctionGraph(basinGraph, func)
+f, f2, fstd, df = fgraph()
+basins = fgraph.graph.nodes()
+dfbasins = sorted(((fgraph.graph.node[b]['dsvarf']/f**2).sum(), b)
+                for b in fgraph.graph.nodes())
+dfs, basins = zip(*dfbasins)
+cdf = np.array(dfs).cumsum()
+cdf /= cdf[-1]
+
+
+driver.insertNewESplit(basin)
+basinGraph.updateMinima()
+
+for i in xrange(driver.nsamples):
+    j = weighted_choice(dfs)
+    driver.sampleReplica(choice(list(basins[j].replicas)))
+
+basinGraph.updateMinima()
+
+
+m = repGraph.minima()[0]
+
+coords = m.coords
+Ecut = np.inf
+energy = m.energy
+
+configs = []
+Emax = []
+
+stepsize = 0.1
+p = sampler.gen_p(coords, stepsize)
+
+while energy < 0.:
+    newcoords = coords + p
+
+    E, G = constraint.getEnergyGradient(newcoords)
+
+    if E > 0:
+        n = G/np.linalg.norm(G)
+        p -= 2 * n * n.ravel().dot(p.ravel())
+        newcoords += p
+        E = constraint.getEnergy(newcoords)
+
+    if E > 0:
+        p = sampler.gen_p(newcoords, stepsize)
+    else:
+        coords = newcoords
+        energy = pot.getEnergy(newcoords)
+        configs.append(newcoords)
+        Emax.append(energy)
+
+
+
+raise
+
+
+from math import exp, log, sqrt
+
+self = fgraph
+std = True
+parent = basins[1]
+basin = basins[0]
+
+fgraph.calcNodeIntegral(None, basins[1], func)
+
+cdf = np.r_[0.,dfs].cumsum()
+cdf /= cdf[-1]
+
+children = basinGraph.graph.successors(basin)
+
+
+
+basinGraph.updateMinima()
+
+
+driver.insertNewESplit(basin)
+
+
+
+for i in xrange(driver.nsamples):
+    driver.sampleReplica(choice(replicas))
+
+
+raise
 
 sampled, unsampled, Esplit = self.sampleBasin(basin)
 
@@ -350,7 +930,40 @@ else:
                     izip(clusteri, ps))
 
 
+
 agglom.plot()
+
+basinGraph.updateMinima()
+
+def heatCapacityFunc(E, T=[1.], Emin=-44.):
+    T = np.atleast_1d(T)
+    E = np.atleast_1d(E)-Emin
+    ET = (E[None,:]/T[:,None])
+    return ET**2 * np.exp(-ET)
+
+Ts = np.logspace(-2,2,50)
+func = lambda E: heatCapacityFunc(E, Ts)
+
+from nestedbasinsampling.disconnectivitygraphs import FunctionGraph
+
+
+fgraph = FunctionGraph(basinGraph, func)
+Cv, Cv2, Cvstd, dCvVar = fgraph()
+
+print fgraph()
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 raise
 

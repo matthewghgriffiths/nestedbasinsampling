@@ -36,7 +36,7 @@ class AndersonDarling(object):
 
         ns = np.asanyarray(ns)
         k = len(ns)
-        N = sum(ns)
+        N = int(ns.sum())
 
         H = (1. / ns).sum()
         hs_cs = (1. / np.arange(N - 1, 1, -1)).cumsum()
@@ -119,7 +119,7 @@ class AndersonDarling(object):
 
         H = sum(cdfs[1:], cdfs[0])
         A2kn = sum(cdf.calcAndersonFit(H, midrank=midrank) for cdf in cdfs)
-        return cls.calculateSignificance(A2kn, map(len, cdfs))
+        return cls.calculateSignificance(A2kn, [cdf.n for cdf in cdfs])
 
 class CDF(object):
     """Class for storing and manipulating the CDF of a univariate
@@ -138,7 +138,7 @@ class CDF(object):
 
     Methods
     -------
-    calcAndersonRight
+    calcAndersonFit
     """
 
     def __init__(self, Xs, ws=None, n=None):
@@ -149,9 +149,10 @@ class CDF(object):
         Xs = np.asanyarray(Xs).ravel()
         argsort = Xs.argsort()
 
-        self.n = len(Xs) if n is None else n
+        self._n = len(Xs)
+        self.n = self._n if n is None else n
         if ws is None:
-            self._ws = np.ones_like(Xs,dtype=float)/self.n
+            self._ws = np.ones_like(Xs,dtype=float)/self._n
         else:
             self._ws = np.array(ws)[argsort]
         self._Xs = Xs[argsort]
@@ -284,6 +285,11 @@ class AgglomerativeCDFClustering(object):
             sig, F1, F2 = self._getBestPair()
             self._mergePair(F1,F2)
 
+    @property
+    def significance(self):
+        self.agglomerate()
+        return self.nodep[self.state[-1][0]]
+
     def getMaxLikelihood(self):
         self.agglomerate()
         _clusterps = ((self.nodep[F] for F in a) for a in self.state)
@@ -369,6 +375,7 @@ class AgglomerativeCDFClustering(object):
 
 
 
+
 if __name__ == "__main__":
     from scipy.stats import anderson_ksamp, norm, t
 
@@ -392,7 +399,7 @@ if __name__ == "__main__":
     print anderson_ksamp(samples)
 
     print "Comparing student t distribution vs normal"
-    samples = [norm.rvs(size=20), t.rvs(3, size=20)]
+    samples = [norm.rvs(size=500), t.rvs(3, size=500)]
     Fs = [CDF(Xs) for Xs in samples]
     print "pvalue = {:5.2g}".format(
         AndersonDarling.compareDistributions(samples)[0])
@@ -400,7 +407,7 @@ if __name__ == "__main__":
     #Fs[0].plot(); Fs[1].plot()
 
     print "Comparing normal vs normal"
-    samples = [norm.rvs(size=10), norm.rvs(size=10)]
+    samples = [norm.rvs(size=100), norm.rvs(size=100)]
     Fs = [CDF(Xs) for Xs in samples]
     print "pvalue = {:5.2g}".format(
         AndersonDarling.compareDistributions(samples)[0])
@@ -409,8 +416,8 @@ if __name__ == "__main__":
     print 'Hierarchical clustering'
 
     norms1 = [norm.rvs(loc=0,scale=1,size=50) for i in xrange(10)]
-    norms2 = [norm.rvs(loc=1,scale=1,size=50) for i in xrange(10)]
-    norms3 =  [norm.rvs(loc=-1,scale=1,size=50)for i in xrange(10)]
+    norms2 = [norm.rvs(loc=2,scale=1,size=50) for i in xrange(10)]
+    norms3 =  [norm.rvs(loc=-2,scale=1,size=50)for i in xrange(10)]
     samples = norms1 + norms2 + norms3
     Fn = [CDF(Xs) for Xs in norms1]
     Fn2 = [CDF(Xs) for Xs in norms2]
@@ -420,9 +427,46 @@ if __name__ == "__main__":
 
     agglom = AgglomerativeCDFClustering(Fs)
 
-    agglom.plot(method='MinClusters')
     agglom.plot(method='MaxClusters')
+    agglom.plot(method='MinClusters')
     agglom.plot()
 
+if 0:
+    # Testing combining different samples
+    ps = np.array([1.,2.,10.])
+    ps /= ps.sum()
 
+    dists = [lambda n: norm.rvs(size=n, loc=1.),
+             lambda n: norm.rvs(size=n, scale=0.5),
+             lambda n: t.rvs(2, size=n, loc=-1, scale=2)]
+
+    ns = np.random.multinomial(100, ps)
+
+    samples = np.concatenate([dist(n) for dist, n in zip(dists, ns)])
+    H = CDF(samples)
+
+    D0 = CDF(dists[0](40))
+    D1 = CDF(dists[1](40))
+    D2 = CDF(dists[2](40))
+
+    H0 = D0 + D1 + D2
+
+    print AndersonDarling.compareDistributions([D0,H])
+    print AndersonDarling.compareDistributions([D1,H])
+    print AndersonDarling.compareDistributions([D2,H])
+    print AndersonDarling.compareDistributions([H0,H])
+
+    D0.plot();D1.plot();D2.plot();H.plot();H0.plot()
+
+    nws = np.random.multinomial(120, ps)
+    #nws=ns
+    D0w = CDF(D0._Xs,n=nws[0])
+    D1w = CDF(D1._Xs,n=nws[1])
+    D2w = CDF(D2._Xs,n=nws[2])
+
+    H1 = D0w + D1w + D2w
+
+    H.plot();H0.plot();H1.plot()
+
+    AndersonDarling.compareDistributions([H,H1])
 
