@@ -9,7 +9,6 @@ import numpy as np
 #from nestedbasinsampling.utils import SortedCollection
 from nestedbasinsampling.storage import Run
 
-
 def findRunSplit(run, splitf=0.5):
     logt = np.log(run.nlive) - np.log(run.nlive+1)
     logF = logt.cumsum()
@@ -96,6 +95,7 @@ def combineAllRuns(runs, parent=None, child=None):
         parent = max((run.parent for run in runs), key=lambda r: r.energy)
     if child is None:
         child = min((run.child for run in runs), key=lambda r: r.energy)
+
     Ecut = parent.energy
     Efinish = max(min(Emax[-1] for Emax in Emaxs), child.energy)
 
@@ -115,13 +115,15 @@ def combineAllRuns(runs, parent=None, child=None):
 
     while(Ecurr >= Efinish):
         # Adding highest energy live point to run
+
         Emaxnew.append(Ecurr)
         nlivenew.append(nlive)
         if store:
             # If this configuration has been saved, save it
-            if storeds[i][currstored[i]] == currind[i]:
+            if storeds[i].size and storeds[i][currstored[i]] == currind[i]:
                 storednew.append(len(Emaxnew)-1)
-                configsnew.append(configs[i][currstored[i]])
+                if configs[i]:
+                    configsnew.append(configs[i][currstored[i]])
                 if store_stepsize:
                     stepsizesnew.append(stepsizes[i][currstored[i]])
                 currstored[i] += 1
@@ -132,10 +134,19 @@ def combineAllRuns(runs, parent=None, child=None):
         if currind[i] == ns[i]:
             Emaxcurr[i] = - np.inf
             nactive[i] = 0
+            # If combining consecutive nested sampling runs then we need
+            # to skip the first value of the next nested sampling run
+            i = Emaxcurr.argmax()
+            if Emaxcurr[i] == Ecurr and currind[i] == 0:
+                currind[i] = 1
+                Emaxcurr[i] = Emaxs[i][currind[i]]
+                nactive[i] = nlives[i][currind[i]]
+                nlive += nactive[i]
         else:
             Emaxcurr[i] = Emaxs[i][currind[i]]
             nactive[i] = nlives[i][currind[i]]
             nlive += nactive[i]
+
         # Get the highest energy configuration
         i = Emaxcurr.argmax()
         Ecurr = Emaxcurr[i]
@@ -144,6 +155,33 @@ def combineAllRuns(runs, parent=None, child=None):
                  stored=storednew, configs=configsnew, stepsizes=stepsizesnew)
     return newRun
 
+def splitRun(run, startrep, endrep):
+    """ Splits a run between startrep and endrep
+    """
+    configs = run.configs
+    nlive = run.nlive
+    stepsizes = run.stepsizes
+    Emax = run.Emax
+    stored = run.stored
+    volume = run.volume
+
+    istart = Emax.size - Emax[::-1].searchsorted(startrep.energy, side='left')
+    iend = Emax.size - Emax[::-1].searchsorted(endrep.energy, side='left')
+
+    jstart, jend = stored.searchsorted([istart, iend], side='left')
+
+    newEmax = Emax[istart:iend]
+    newnlive = nlive[istart:iend]
+    newStored, newStepsizes, newConfigs = None, None, None
+    if stored.size:
+        newStored = stored[jstart:jend] - istart
+        if stepsizes.size:
+            newStepsizes = stepsizes[jstart:jend]
+        if configs.size:
+            newConfigs = configs[jstart:jend]
+
+    return Run(newEmax, newnlive, startrep, endrep, volume=volume,
+               stored=newStored, configs=newConfigs, stepsizes=newStepsizes)
 
 def combineRuns(run1, run2):
     Emax1 = run1.Emax
@@ -219,248 +257,73 @@ def combineRuns(run1, run2):
     return Run(Emaxnew, nlivenew, parent, child, volume=volume,
                stored=stored, configs=configs, stepsizes=stepsizes)
 
-class NestedSamplingRun(object):
-    """
-    """
-    def __init__(self, Vmax=[], nlive=None, volume=1., Vcut=np.inf, configs=None):
-        self.Vmax = Vmax
-        self.nlive = [1 for V in Vmax] if nlive is None else nlive
-        self.volume = volume
-        self.Vcut = Vcut
-        self.configs = None
+def calcRunWeights(run):
 
-    def combine(self, run):
-        """
-        Joins this nested sampling run with the nested sampling run passed in
+    ns = run.nlive.astype(float)
+    Emax = run.Emax.copy()
 
-        parameters
-        ----------
-        run : NestedSamplingRun (or derived class)
-            the nested sampling run joining with the current class
+    Xs = (ns/(ns+1.)).cumprod()
+    n1n2 = ((ns+1.)/(ns+2.)).cumprod()
+    X2s = Xs * n1n2
+    n2n3 = ((ns+2.)/(ns+3.)).cumprod()
+    n3n4 = ((ns+3.)/(ns+4.)).cumprod()
 
-        returns
-        -------
-        newrun : NestedSamplingRun (or derived class)
-            the combined nested sampling run
-        """
-        Vmax1 = self.Vmax
-        nlive1 = self.nlive
-        Vcut1 = self.Vcut
+    X = Xs[-1] if Xs.size else 0.
+    X2 = X2s[-1] if X2s.size else 0.
 
-        Vmax2 = run.Vmax
-        nlive2 = run.nlive
-        Vcut2 = run.Vcut
+    dF = Xs / ns
 
-        n1, n2 = len(Vmax1), len(Vmax2)
-        i1, i2 = 0, 0
+    d2F2 = (n1n2/(ns+1.))
+    dF2  = 2 * Xs / ns
 
-        Vmaxnew = []
-        nlivenew = []
+    XdF = X * n1n2 / ns
+    X2dF = X2 * n2n3 / ns
 
-        while(i1!=n1 or i2!=n2):
-            V1 = Vmax1[i1] if i1 < n1 else -np.inf
-            live1 = nlive1[i1] if i1 < n1 else 0
-            V2 = Vmax2[i2] if i2 < n2 else -np.inf
-            live2 = nlive2[i2] if i2 < n2 else 0
+    Xd2F2 = n2n3/(ns+2.)
+    XdF2 = 2 * n1n2/(ns+1.) * X
 
-            if (V1 > V2):
-                Vmaxnew.append(V1)
-                nlive = live1
-                if V1 < Vcut2:
-                    nlive += live2
-                nlivenew.append(nlive)
-                i1 += 1
-            else:
-                Vmaxnew.append(V2)
-                nlive = live2
-                if V2 < Vcut1:
-                    nlive += live1
-                nlivenew.append(nlive)
-                i2 += 1
+    X2d2F2 = n3n4/(ns+3.)
+    X2dF2 = 2 * n2n3/(ns+2.) * X2
 
-        Vcut = max(Vcut1, Vcut2)
+    dvarf = ( (2*(ns+1)/(ns+2) *
+              ((ns+2)**2/(ns+1)/(ns+3)).cumprod()).mean() -
+             (2*ns/(ns+1) * ((ns+1)**2/ns/(ns+2)).cumprod()).mean())
+    dvarX = (np.exp((2*np.log(ns+2)-np.log(ns+1)-np.log(ns+3)).sum()) -
+             np.exp((2*np.log(ns+1)-np.log(ns+0)-np.log(ns+2)).sum()) )
 
-        return type(self)(Vmax=Vmaxnew, nlive=nlivenew,
-                          volume=self.volume, Vcut=Vcut)
+    if dvarf < -1. or dvarf >= 0:
+        dvarf = -1.
+    if dvarX < -1. or dvarX >= 0:
+        dvarX = -1.
 
-    __add__ = combine # So Nested Sampling runs can be easily added together
+    weights = dict(Emax=Emax, dF=dF, d2F2=d2F2, dF2=dF2,
+                   XdF=XdF, X2dF=X2dF,
+                   XdF2=XdF2, Xd2F2=Xd2F2,
+                   X2d2F2=X2d2F2, X2dF2=X2dF2,
+                   dvarf=dvarf, dvarX=dvarX)
 
-    def calcBasinFracVolume(self):
-        nlive = np.array(self.nlive)
-        self.frac = (nlive) / (nlive+1.)
-        self.fracVolume = np.cumprod(self.frac)
-        self.basinVolume = self.fracVolume*self.volume
-        return self.fracVolume
+    return weights
 
-    def calcBasinFracDoS(self, Vi, deltaV=None, err=False):
-        pass
+def calcAverageValue(weights, func, std=True):
+    Emax = weights['Emax']
+    dF = weights['dF']
+    XdF = weights['XdF']
+    X2dF = weights['X2dF']
+    d2F2 = weights['d2F2']
+    dF2 = weights['dF2']
+    Xd2F2 = weights['Xd2F2']
+    XdF2 = weights['XdF2']
+    X2d2F2 = weights['X2d2F2']
+    X2dF2 = weights['X2dF2']
 
-#
-#
-#class LivePoints(SortedCollection):
-#    """ object to store the results of a nested sampling run, it maintains
-#    a list of energies in sorted order
-#
-#    Parameters:
-#    replicas: list of Replicas
-#        List of replicas Replica(x, energy)
-#
-#    """
-#    def __init__(self, replicas=[], tol=0.):
-#        self._key = lambda x: x.energy
-#        decorated = sorted((self._key(item), item) for item in replicas)
-#        self._keys = [k for k, item in decorated]
-#        self._items = [item for k, item in decorated]
-#
-#        self.tol = tol
-#
-#    def pop(self):
-#        self._keys.pop()
-#        return self._items.pop()
-#
-#    def copy(self):
-#        return self.__class__(self)
-#
-#    def pop_largest(self):
-#        """
-#        Removes all replicas within tol of the highest energy replica
-#
-#        Returns
-#        -------
-#        Ecuts: list of float
-#            List of the energies of the replicas removed
-#        rs: list of Replica
-#
-#        """
-#
-#        to_remove = bisect_left(self._keys, self._keys[-1]-self.tol)
-#
-#        self._keys, Ecuts = self._keys[:to_remove], self._keys[to_remove:]
-#        self._items, rs = self._items[:to_remove], self._items[to_remove:]
-#
-#        return Ecuts, rs
-#
-#    def __repr__(self):
-#        return "LivePoints({:s})".format(repr(self._keys))
-#
-#
-#class NestedSampling(object):
-#
-#    prtstr = "iteration {:6d}, energy cutoff: {:10.5g}, fraction left, {:10.5g}"
-#
-#    def __init__(self, replicas, sampler, Etol=0., store_config=False,
-#                 verbose=True, iprint=1, database=None, cpfreq=100,
-#                 iter_number=0, f=1., run=None):
-#
-#
-#        self.sampler = sampler
-#
-#        self.Etol = Etol
-#        self.replicas = LivePoints(replicas, self.Etol)
-#
-#        self.iter_number = iter_number
-#        self.f = f
-#
-#        self.database = database
-#        if self.database is not None:
-#            self.run = self.initialize_run() if run is None else run
-#        self.cpfreq = cpfreq
-#        self.store_config = store_config
-#        self.Emax = []
-#        self.Nlive = []
-#        self.Nremove = []
-#        self.configs = [] if self.store_config else None
-#
-#        self.verbose = verbose
-#        self.iprint = iprint
-#
-#    def initialize_run(self):
-#        self.run = self.database.add_run([],[],[])
-#        return self.run
-#
-#    def save_run(self):
-#        self.run = self.database.update_run(self.run, self.Emax,
-#                                            self.Nlive, self.configs)
-#        return self.run
-#
-#    def nested_step(self):
-#        """
-#        Performs nested sampling step
-#        """
-#
-#        if len(self.replicas) == 0:
-#            return 0.
-#
-#        Ecut, deadpoints, Nlive, Nremove = self.pop_replicas()
-#
-#        self.f *= 1. - Nremove/(Nlive+1.)
-#
-#        newreplicas = self.sampler.new_points(
-#            Ecut, Nremove, replicas=self.replicas, driver=self)
-#
-#        for replica in newreplicas:
-#            if replica.energy < Ecut:
-#                replica.niter = self.iter_number
-#                self.replicas.insert(replica)
-#
-#        if self.verbose and self.iter_number % self.iprint == 0:
-#            print self.prtstr.format(self.iter_number, Ecut, self.f)
-#
-#        self.iter_number += 1
-#
-#        return self.f
-#
-#    def pop_replicas(self):
-#        """
-#        remove the replicas with the largest energies and store them in the max_energies array
-#        """
-#        # pull out the replicas with the largest energy
-#
-#        Nlive = len(self.replicas)
-#        Ecuts, rs = self.replicas.pop_largest()
-#        Ecut = Ecuts[0]
-#        Nremove = len(Ecuts)
-#
-#        r=rs[-1]
-#
-#        self.Emax.append(r.energy)
-#        self.Nlive.append(Nlive)
-#        self.Nremove.append(Nremove)
-#        if self.store_config:
-#            self.configs.append(np.array([_r.x.copy() for _r in rs]))
-#
-#        # Save configurations
-#        if self.database is not None and self.iter_number%self.cpfreq == 0:
-#            self.save_run()
-#
-#
-#        return Ecut, rs, Nlive, Nremove
-#
-#    def get_state(self):
-#        state = dict(f=self.f, iter_number=self.iter_number,
-#                     replicas=self.replicas, Emax=self.Emax,
-#                     Nlive=self.Nlive, Nremove=self.Nremove,
-#                     configs=self.configs, run=self.run)
-#        return state
-#
-#    def save_state(self, filename):
-#
-#        state = self.get_state(self)
-#        with open(filename, 'wb') as f:
-#            cPickle.dump(state, f)
-#
-#    def set_state(self, state):
-#        self.f          = state["f"]
-#        self.iter_number= state["iter_number"]
-#        self.replicas   = state["replicas"]
-#        self.Emax       = state["Emax"]
-#        self.Nlive      = state["Nlive"]
-#        self.Nremove    = state["Nremove"]
-#        self.configs    = state["configs"]
-#        self.run        = state["run"]
-#
-#    def read_state(self, filename):
-#        with open(filename, 'rb') as f:
-#            state = cPickle.load(f)
-#
-#        self.set_state(state)
+    fj = np.atleast_2d(func(Emax))
+    f = fj.dot(dF)
+    Xf = fj.dot(XdF)
+    if std:
+        X2f = fj.dot(X2dF)
+        f2 = np.einsum("ij,j,ij->i", fj, d2F2, (fj*dF2).cumsum(1))
+        Xf2 = np.einsum("ij,j,ij->i", fj, Xd2F2, (fj*XdF2).cumsum(1))
+        X2f2 = np.einsum("ij,j,ij->i", fj, X2d2F2, (fj*X2dF2).cumsum(1))
+        return f, Xf, X2f, f2, Xf2, X2f2
+    else:
+        return f, Xf

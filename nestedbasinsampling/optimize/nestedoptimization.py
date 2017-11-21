@@ -3,7 +3,7 @@
 import numpy as np
 from pele.optimize import lbfgs_cpp
 
-from nestedbasinsampling.samplers import GMCSampler, SamplingError
+from nestedbasinsampling.sampling import GMCSampler, SamplingError
 from nestedbasinsampling.utils import (Result, NestedSamplingError,
                                        dict_update_keep)
 

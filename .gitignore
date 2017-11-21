@@ -93,6 +93,9 @@ ENV/
 .spyproject
 .goutputstream*
 
+# sqlalchemy
+*.sql*
+
 # Rope project settings
 .ropeproject
 

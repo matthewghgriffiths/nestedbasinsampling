@@ -2,6 +2,7 @@
 """
 import threading
 import os
+from functools import total_ordering
 
 import numpy as np
 
@@ -22,6 +23,7 @@ verbose=False
 
 Base = declarative_base()
 
+@total_ordering
 class Minimum(Base):
     """
     The Minimum class represents a minimum in the database.
@@ -90,20 +92,27 @@ class Minimum(Base):
     def __eq__(self, m):
         """m can be integer or Minima object"""
         assert self.id() is not None
-        if isinstance(m, Minimum):
+        if isinstance(m, type(self)):
             assert m.id() is not None
             return self.id() == m.id()
-        elif isinstance(m, Replica):
+        elif hasattr(m, 'id'):
             return False
         else:
             return self.id() == m
+
+    def __gt__(self, m):
+        return self.energy > m.energy
 
     def __hash__(self):
         #_id = self.id()
         #assert id is not None
         #_id = self.energy ## needed to differentiate from Replica
-        return self.energy + self.coords.sum()
+        return hash(self.energy + self.coords.sum())
 
+    def __deepcopy__(self, memo):
+        return self.__class__(self.energy, self.coords)
+
+@total_ordering
 class Replica(Base):
     """
     The Replica class represents a replica in the database.
@@ -168,19 +177,27 @@ class Replica(Base):
         """m can be integer or Replica object"""
         assert self.id() is not None
         #if isinstance(replica, Replica):
-        if type(replica) is Replica:
+        if isinstance(replica, type(self)):
             assert replica.id() is not None
             return self.id() == replica.id()
-        #elif isinstance(replica, Minimum):
-        #    return False
+        elif hasattr(replica, 'id'):
+            return False
         else:
             return self.id() == replica
 
+    def __gt__(self, rep):
+        return self.energy > rep.energy
+
     def __hash__(self):
-        _id = self.id()
-        assert id is not None
-        _id = hash(self.energy) ## needed to differentiate from Minimum
-        return _id
+        #_id = self.id()
+        #assert id is not None
+        #return _id
+        ## needed to differentiate from Minimum
+        csum = 0. if self.coords is None else self.coords.sum()
+        return hash(self.energy + csum)
+
+    def __deepcopy__(self, memo):
+        return self.__class__(self.energy, self.coords, stepsize=self.stepsize)
 
 class Run(Base):
     """
@@ -332,6 +349,7 @@ class Path(Base):
 
     # deferred means the object is loaded on demand, that saves some time / memory for huge graphs
     energies = deferred(Column(PickleType))
+    stored = deferred(Column(PickleType))
     configs = deferred(Column(PickleType))
 
     _parent_id = Column(Integer, ForeignKey('tbl_replicas._id'))
@@ -354,7 +372,8 @@ class Path(Base):
     user_data = deferred(Column(PickleType))
     """this can be used to store information about the nested sampling run"""
 
-    def __init__(self, energy, parent, child, energies=None, configs=None):
+    def __init__(self, energy, parent, child,
+                 energies=None, stored=None, configs=None, **user_data):
 
         self.energy = np.array(energy)
 
@@ -372,6 +391,16 @@ class Path(Base):
 
         self.energies = np.array([]) if energies is None else np.array(energies)
         self.configs  = np.array([]) if configs is None else np.array(configs)
+
+        if stored is not None:
+            self.stored = np.array(stored)
+        elif len(self.configs) == len(self.energies):
+            self.stored = np.arange(len(self.energies))
+        else:
+            self.stored = np.array([], dtype=int)
+
+        if user_data:
+            self.user_data = user_data
 
         self.invalid = False
 
@@ -407,8 +436,7 @@ class Path(Base):
             return self.id() == m
 
     def __hash__(self):
-        return (self.energy + self.childE)/2
-
+        return hash(self.child) ^ hash(self.parent)
 
 
 class TransitionState(Base):
@@ -842,13 +870,13 @@ class Database(object):
         return self.session.query(Path).all()
 
     def addPath(self, energy, parent, child,
-                energies=None, configs=None, commit=True):
+                energies=None, stored=None, configs=None, commit=True):
 
         self.lock.acquire()
 
         configs = None if configs is None else np.asanyarray(configs)
         new = Path(energy, parent, child,
-                   energies=energies, configs=configs)
+                   stored=None, energies=energies, configs=configs)
 
         self.session.add(new)
         if commit:
@@ -865,7 +893,7 @@ class Database(object):
         return  self.session.query(Path).get(pathid)
 
     def update_path(self, path, energy, parent, child,
-                    energies=None, configs=None, commit=True):
+                    energies=None, stored=None, configs=None, commit=True):
         """
         Parameters
         ----------

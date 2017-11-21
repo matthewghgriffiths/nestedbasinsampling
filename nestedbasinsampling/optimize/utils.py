@@ -5,7 +5,7 @@ from collections import defaultdict
 import numpy as np
 from pele.optimize import lbfgs_cpp
 
-from nestedbasinsampling.utils import dict_update_keep
+from nestedbasinsampling.utils import dict_update_keep, Result
 
 class BasinPotential(object):
     """
@@ -49,7 +49,12 @@ class RecordMinimization(object):
         res = self.minimizer(coords, pot=self.pot, **new_kw)
 
         if res is None:
-            raise Exception
+            res = Result()
+            res.coords = coords
+            res.energy, res.grad = self.pot.getEnergyGradient(coords)
+            res.nsteps = 0
+            res.success = False
+            return res
 
         for key, item in self.store.iteritems():
             if hasattr(res, key):

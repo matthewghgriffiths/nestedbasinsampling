@@ -1,25 +1,26 @@
 # -*- coding: utf-8 -*-
 
+from collections import defaultdict
 from itertools import chain, izip, groupby
-
+from functools import total_ordering
 from math import exp, log, sqrt
 
 import numpy as np
-
 from scipy.special import gammaln
 from scipy.integrate import quad
-
 import networkx as nx
-
 import matplotlib.pyplot as plt
 
-from nestedbasinsampling.storage import \
-    Minimum, Replica, Run, Database
-from nestedbasinsampling.random.stats import AndersonDarling, CDF
+from pele.utils.disconnectivity_graph import DisconnectivityGraph
 
-from nestedbasinsampling.nestedsampling import combineAllRuns
+from nestedbasinsampling.storage import Minimum, Replica, Run, Database, TransitionState
+from nestedbasinsampling.sampling.stats import AndersonDarling, CDF
+from nestedbasinsampling.nestedsampling import combineAllRuns, splitRun
 from nestedbasinsampling.utils import iter_minlength
+from nestedbasinsampling.utils.sortedcollection import SortedCollection
+from .functionGraph import NumericIntegrator
 
+@total_ordering
 class SuperBasin(object):
     """ SuperBasin object.
 
@@ -55,18 +56,31 @@ class SuperBasin(object):
     def __ne__(self, basin):
         return self.replicas != basin.replicas
 
+    def __gt__(self, basin):
+        return self.energy > basin.energy
+
     def __hash__(self):
         return hash(self.replicas)
+
+    def __str__(self):
+        return (
+            "SuperBasin([" +
+            ", \n            ".join(
+                "Replica(energy={:6.4g})".format(r.energy)
+                for r in sorted(self.replicas)) + "])")
 
 class BasinGraph(object):
     """ This class joins replicas in the ReplicaClass together
     as a set of super basins.
     """
-    def __init__(self, replicaGraph, target_sig=1e-2):
+    def __init__(self, replicaGraph, Emax=None, disconnect_kw={}):
         """
         """
         self.repGraph = replicaGraph
-        self.target_sig = 1e-2
+        self.Emax = None
+        self._connectgraph = nx.Graph()
+        self._disconnectgraph = None
+        self.disconnect_kw = disconnect_kw
         self.initialize()
 
     def initialize(self):
@@ -75,94 +89,841 @@ class BasinGraph(object):
         self.graph = nx.DiGraph()
         self.repdict = {}
 
-    def connectBasins(self, parent, basin):
+    def basins(self, order=True):
         """
         """
-        runs = list(self.genConnectingRuns(parent, basin))
-        parentrep = min(parent.replicas, key=lambda r: r.energy)
-        childrep = min(basin.replicas, key=lambda r: r.energy)
-        if runs:
-            run = combineAllRuns(runs, parentrep, childrep)
-            self.graph.add_edge(parent, basin, parent=parent,
-                                run=run, nruns=len(runs))
+        if order:
+            basins = sorted(
+                (node for node in self.graph.nodes()
+                 if type(node) is SuperBasin), key=lambda n: n.energy)
         else:
-            if isinstance(childrep, Minimum):
-                children = set(
-                    chain(*chain(self.repGraph.graph.successors_iter(r)
-                                 for r in parent)) )
-                if children == basin.replicas:
-                    self.graph.add_edge(parent, basin, parent=parent,
-                                        minimum=childrep, nruns=len(parent))
-            run = None
-        return run
-
-    def isDangling(self, basin, nsamples=2):
-        """ Tests whether there is only less than nsamples replicas in a
-        basin that is connected to nsamples or more replicas
-        """
-        if len(basin.replicas) < nsamples:
-            r, = basin.replicas
-            successors = chain(*(self.repGraph.graph.successors_iter(r)
-                                 for r in basin.replicas))
-            return not iter_minlength(successors, nsamples)
-        else:
-            return False
-
-    def isSingleton(self, basin):
-        """ Tests whether there is only one replica in basin which is
-        connected to less than 2 other replicas
-        """
-        if self.isDangling(basin):
-            r, = basin.replicas
-            return not iter_minlength(self.repGraph.graph.successors_iter(r),2)
-        else:
-            return False
-
-    def getParent(self, basin):
-        parents = self.graph.predecessors(basin)
-        parent, = parents if parents else (None,)
-        return parent
-
-    def genConnectingRuns(self, basin, child):
-        """
-        """
-        if basin!=child:
-            for parentrep in basin.replicas:
-                edges = self.repGraph.graph.edge[parentrep]
-                for childrep, attr in edges.iteritems():
-                    if childrep in child.replicas:
-                        if attr.has_key('run'):
-                            yield attr['run']
+            basins = [node for node in self.graph.nodes()
+                      if type(node) is SuperBasin]
+        return basins
 
     def SuperBasin(self, replicas, parent=None, **kwargs):
         """
         """
-
-        if parent is None:
-            parentreplicas = set(
-                chain(*(self.repGraph.genPreceedingReplicas(r)
-                        for r in replicas)) )
-            parentbasins = set(self.repdict[r] for r in parentreplicas
-                               if self.repdict.has_key(r))
-            parent = [basin for basin in parentbasins
-                      if not any(nx.has_path(self.graph, basin, b)
-                                 for b in parentbasins if not b is basin)]
-        else:
-            parent = [parent]
-
         basin = SuperBasin(replicas)
         self.repdict.update((rep, basin) for rep in replicas)
         self.graph.add_node(basin, energy=basin.energy, **kwargs)
 
-        if len(parent):
-            assert len(parent) == 1
-            parent = parent.pop()
+        if parent is None:
+            parent = self.findParentBasin(basin)
+        if parent is not None:
             self.connectBasins(parent, basin)
+
+        minset = set(self.genAllConnectedMinima(basin))
+        for m in minset:
+            minbasin = self.repdict[m]
+            self.connectTreeBasins(basin, minbasin)
 
         return basin
 
-    def updateMinimum(self, m):
+    def newMinimum(self, m):
+
+        if m not in self.repdict:
+            newbasin = self.SuperBasin([m])
+        else:
+            newbasin = self.repdict[m]
+
+        # Updating the tree
+        predecessors = set()
+        for r in self.repGraph.genReplica2Root(m):
+            if self.repdict.has_key(r):
+                predecessors.add(self.repdict[r])
+        self.mergeBranches(predecessors)
+
+        assert nx.is_branching(self.graph)
+
+        self.checkBasin(newbasin)
+
+        return newbasin
+
+    def connectBasins(self, parent, basin, calcruns=False):
         """
+        """
+        assert parent != basin
+
+        if calcruns:
+            runs = list(self.genConnectingRuns(parent, basin))
+            parentrep = min(parent.replicas, key=lambda r: r.energy)
+            childrep = min(basin.replicas, key=lambda r: r.energy)
+            if runs:
+                run = combineAllRuns(runs, parentrep, childrep)
+                self.graph.add_edge(parent, basin, parent=parent,
+                                    run=run, nruns=len(runs))
+            else:
+                paths = list(self.genConnectingPaths(parent, basin))
+                self.graph.add_edge(parent, basin, parent=parent,
+                                    paths=paths, nruns=0)
+                run = None
+            return run
+        else:
+            self.graph.add_edge(parent, basin, parent=parent)
+
+    def connectTreeBasins(self, parent, child):
+
+        parentbranch = (
+            self.repdict[r2] for r1 in parent for r2 in
+            self.repGraph.genReplica2Root(r1) if self.repdict.has_key(r2))
+        childbranch = (
+            self.repdict[r2] for r1 in child for r2 in
+            self.repGraph.genReplica2Root(r1) if self.repdict.has_key(r2))
+        newbranch = sorted(set(chain(parentbranch, childbranch)))
+        for b1, b2 in izip(newbranch[1:], newbranch[:-1]):
+            for pre in self.graph.predecessors(b2):
+                if pre != b1:
+                    self.graph.remove_edge(pre, b2)
+            if not self.graph.has_edge(b1, b2):
+                self.graph.add_edge(b1, b2, parent=b1)
+
+    def removeBasin(self, basin):
+        parent = self.getParent(basin)
+        if parent is not None:
+            for child in self.graph.successors_iter(basin):
+                self.connectBasins(parent, child)
+        self.graph.remove_node(basin)
+
+    def updateBasinReplicas(self, basin):
+        minrep = min(basin.replicas)
+        toadd = [rep for rep in self.genSucceedingReplicas(basin)
+                 if rep > minrep]
+        if toadd:
+            return self.addtoBasin(basin, toadd)
+        else:
+            return basin
+
+    def mergeBranches(self, tomerge):
+        """Ensures that all the basins and their predecessors in tomerge
+        are connected in decreasing energy order
+        """
+        basins = sorted(set(
+            b2 for b1 in tomerge
+            for b2 in chain([b1], self.genPreceedingBasins(b1))))
+
+        for i, b1 in enumerate(basins[:-1]):
+            for b2 in self.graph.predecessors(b1):
+                if b2 != basins[i+1]:
+                    self.graph.remove_edge(b2, b1)
+
+            if not self.graph.has_edge(basins[i+1], b1):
+                self.connectBasins(basins[i+1], b1)
+
+        assert all(self.checkBasin(b) for b in basins)
+        #print 'mergeBranches check', all(self.checkBasin(b) for b in basins)
+
+    def mergeBasins(self, basins):
+        """
+        """
+        if len(basins) > 1:
+            newbasin = reduce(lambda x,y: x+y, basins)
+            self.graph.add_node(newbasin, energy=newbasin.energy)
+            newbasin = self.updateBasinReplicas(newbasin)
+            self.repdict.update((rep, newbasin)
+                                for rep in newbasin.replicas)
+            mapping = dict((basin, newbasin) for basin in basins)
+            nx.relabel_nodes(self.graph, mapping, copy=False)
+            return newbasin
+        else:
+            return basins[0]
+
+    def addtoBasin(self, basin, replicas):
+        """
+        """
+        newbasin = basin + SuperBasin(replicas)
+        if basin != newbasin:
+            mapping = {basin: newbasin}
+            self.repdict.update(
+                (rep, newbasin) for rep in newbasin.replicas)
+            nx.relabel_nodes(self.graph, mapping, copy=False)
+        return newbasin
+
+    def getParent(self, basin):
+        try:
+            parent, = self.graph.predecessors_iter(basin)
+        except ValueError:
+            parent = None
+        return parent
+
+    def getSiblings(self, basin):
+        """
+        """
+        parent = self.getParent(basin)
+        siblings = [b for b in self.graph.successors_iter(parent)
+                    if b != basin]
+        return siblings
+
+    def _genSuccessorReplicas(self, basin):
+        """Generates the set of successor replicas to basin
+        """
+        replicas = SortedCollection(basin)
+        minrep = min(basin)
+        while replicas:
+            r1 = replicas.pop() # get the highest energy replica
+            for r2 in self.repGraph.tree.successors_iter(r1):
+                if r2 < minrep:
+                    yield r2
+                else:
+                    replicas.add(r2)
+
+    def genSuccessorReplicas(self, basin):
+        """Generates the set of successor replicas to basin
+        """
+        replicas = SortedCollection(self.genAllConnectedMinima(basin),
+                                    key=lambda b: -b.energy)
+        minrep = min(basin)
+        while replicas:
+            r1 = replicas.pop()
+            successor = False
+            for r2 in self.repGraph.graph.predecessors_iter(r1):
+                if r2 >= minrep:
+                    successor = True
+                else:
+                    replicas.add(r2)
+            if successor:
+                yield r1
+
+    def genPredecessorReplicas(self, basin):
+        """
+        """
+        for r1 in basin:
+            for r2 in self.repGraph.tree.predecessors_iter(r1):
+                if r2 not in basin:
+                    yield r2
+
+    def genPreceedingReplicas(self, basin, ordered=False):
+        """
+        """
+        if ordered:
+            # Create ordered list of  preceeding replicas so that
+            # the last element is the lowest energy replica
+            replicas = SortedCollection(
+                self.genPredecessorReplicas(basin), key=lambda b: -b.energy)
+            while replicas:
+                replica = replicas.pop()
+                for r in self.repGraph.tree.predecessors_iter(replica):
+                    replicas.add(r)
+                yield replica
+        else:
+            for r1 in self.genPredecessorReplicas(basin):
+                for r2 in self.repGraph.genPreceedingReplicas(r1):
+                    yield r2
+
+    def genSucceedingReplicas(self, basin, runs=False, paths=False):
+        for r1 in self.genSuccessorReplicas(basin):
+            yield r1
+            for r2 in self.repGraph.genSucceedingReplicas(r1, runs=runs,
+                                                          paths=paths):
+                yield r2
+
+    def genPreceedingBasins(self, basin):
+        assert basin not in self.graph.predecessors_iter(basin)
+        for child in self.graph.predecessors_iter(basin):
+            for child2 in self.genPreceedingBasins(child):
+                yield child2
+            yield child
+
+    def genSucceedingBasins(self, basin):
+        for child in self.graph.successors_iter(basin):
+            for child2 in self.genSucceedingBasins(child):
+                yield child2
+            yield child
+
+    def findParentBasin(self, basin):
+        for r1 in self.genPreceedingReplicas(basin, ordered=True):
+            if self.repdict.has_key(r1):
+                return self.repdict[r1]
+        else:
+            return None
+
+    def checkBasin(self, basin):
+        """ Checks whether the basin has only
+        """
+
+        predecessors = self.graph.predecessors(basin)
+        successors = self.graph.successors(basin)
+
+        if len(predecessors) > 1:
+            print "Too many parents"
+            return False
+        elif basin in predecessors:
+            print "Self connected"
+            return False
+        if successors:
+            minima = self.getMinimaSet(basin)
+            childminima = reduce(
+                lambda x, y: x.union(y),
+                (self.getMinimaSet(b) for b in successors) )
+
+            if minima.issuperset(childminima):
+                return True
+            else:
+                minima = self.getMinimaSet(basin, recalc=True)
+                childminima = reduce(
+                    lambda x, y: x.union(y),
+                    (self.getMinimaSet(b, recalc=True)
+                     for b in successors) )
+                if not minima.issuperset(childminima):
+                    print 'failure!!!!', basin.energy
+                    print "superset", len(minima), len(childminima), len(minima.difference(childminima))
+                return minima.issuperset(childminima)
+        else:
+            return True
+
+    def getMinimaSet(self, basin, recalc=False):
+        node = self.graph.node[basin]
+        if recalc or not node.has_key('minima'):
+            node['minima'] = set(self.genAllConnectedMinima(basin))
+        return node['minima']
+
+    def genAllConnectedMinima(self, basin):
+        """
+        """
+        for r1 in basin:
+            if isinstance(r1, Minimum):
+                yield r1
+            else:
+                for r2 in self.repGraph.genSucceedingReplicas(r1):
+                    if r2 in basin:
+                        break
+                    elif isinstance(r2, Minimum):
+                        yield r2
+
+    def updateGraph(self):
+        """
+        """
+        self.updateMinima()
+        self.updateAllMinimaSets()
+        self.updateSubgraph(self.basins())
+
+    def basinOutDegree(self, basin, runs=True, paths=False):
+        return sum(iter_minlength(
+            self.repGraph.genConnectedMinima(r, runs=runs, paths=paths), 1)
+            for r in self.genSuccessorReplicas(basin))
+
+    def basinDegree(self, basin):
+        """ Returns the sum of the degree of the replicas in the basin
+        """
+        return sum(d for r, d in
+                   self.repGraph.graph.out_degree_iter(basin.replicas))
+
+    def genConnectedMinima(self, basin, runs=True, paths=False):
+        """ Returns list of connected minima and weights
+        if runs is True only returns minima connected by nested sampling runs
+        if paths is True only returns minima connected by paths
+        if runs and paths are False then returns all minima
+        """
+        successors = list(self.genSuccessorReplicas(basin,
+                                                    runs=runs, paths=paths))
+        if len(successors):
+            f = 1./len(successors)
+            if paths:
+                return (
+                    mf for r in successors
+                    for mf in self.repGraph.genConnectedMinima(
+                        r, f=f, paths=True))
+            elif runs:
+                return (
+                    mf for r in successors
+                    for mf in self.repGraph.genConnectedMinima(
+                        r, f=f, runs=True))
+            else:
+                return (
+                    mf for r in successors
+                    for mf in self.repGraph.genConnectedMinima(
+                        r, f=f, runs=False, paths=False))
+        else:
+            minima = [r for r in basin if isinstance(r, Minimum)]
+            f = 1./len(successors)
+            return ((m, f) for m in minima)
+
+    def getMinimaCDF(self, basin, runs=True, paths=False):
+        """Returns the CDF of the minima connected to basin
+
+        Parameters
+        ----------
+        basin : SuperBasin
+
+        Returns
+        -------
+        cdf : CDF
+            CDF of minima
+        """
+        childminima = [
+            [mf for mf in self.repGraph.genConnectedMinima(
+                r, runs=runs, paths=paths)]
+            for r in self.genSuccessorReplicas(basin)]
+
+        n = sum(1 for minima in childminima if minima)
+        if n:
+            ms, ws = zip(*[(m, f/n)
+                         for minima in childminima for m, f in minima])
+            return CDF([m.energy for m in ms], ws, n=n)
+        else:
+            return None
+
+    def isMinimum(self, basin):
+        for r in basin:
+            if isinstance(r, Minimum):
+                return True
+        else:
+            return False
+
+    def genSamples(self, basin):
+        return (x for r in basin for x in self.repGraph.genSamples(r))
+
+    def genEnergySamples(self, basin):
+        return (E for r in basin for E in self.repGraph.genEnergySamples(r))
+
+    def getEnergyPercentile(self, basin, q):
+        Es = list(self.genEnergySamples(basin))
+        if Es:
+            return np.percentile(Es, q)
+        else:
+            return np.nan * q
+
+    def genConnectingReplicas(self, basin1, basin2):
+        """
+        Generates all the paths in repGraph.graph that 'connect'
+        basin1 to basin2
+        """
+        if basin1 < basin2:
+            basin1, basin2 = basin2, basin1
+
+        target = min(basin1)
+        stop = max(basin1)
+
+        G = self.repGraph.graph
+        cutoff = len(G)
+        minima = self.genAllConnectedMinima(basin2)
+        # Start from all the minima that basin2 is connected to.
+        visitedstacks = [([m], [G.in_edges_iter(m)]) for m in minima]
+        basinreps = set(basin2.replicas).copy()
+        while visitedstacks:
+            visited, stack = visitedstacks.pop()
+            if stack:
+                parent, _ = next(stack[-1], (None, None))
+                basinreps.discard(parent)
+                if parent is None:
+                    stack.pop()
+                    visited.pop()
+                elif len(visited) < cutoff:
+                    if parent >= target:
+                        replicas = (visited + [parent])[::-1]
+                        # Discard the replicas lower than basin2
+                        for i, replica in enumerate(replicas):
+                            if replica.energy < basin2.energy:
+                                yield replicas[:i+1]
+                                break
+                        else:
+                            yield replicas
+                    elif parent not in visited and parent < stop:
+                        visited.append(parent)
+                        stack.append(G.in_edges_iter(parent))
+                visitedstacks.insert(0, (visited, stack))
+            if not visitedstacks:
+                visitedstacks = [([r], [G.in_edges_iter(r)]) for r in basinreps]
+                basinreps = set()
+
+    def getConnectingPath(self, basin1, basin2):
+        # Ensuring basins are in the right order
+        if basin1 < basin2:
+            basin1, basin2 = basin2, basin1
+
+        replicas = next(self.genConnectingReplicas(basin1, basin2), None)
+        startrep = min(basin1)
+        endrep = min(basin2)
+
+        if replicas is not None:
+            path = self.repGraph.replicastoPath(replicas, startrep, endrep)
+        else:
+            path = None
+        return path
+
+    def genConnectingRuns(self, basin1, basin2):
+        """ generates all runs that connect basin1 and basin2
+        """
+        # Ensuring basins are in the right order
+        if basin1 < basin2:
+            basin1, basin2 = basin2, basin1
+
+        allreplicas = self.genConnectingReplicas(basin1, basin2)
+        edgereplicas = (
+            (self.repGraph.graph.edge[r1][r2], r1, r2) for replicas in
+            allreplicas for r1, r2 in izip(replicas[:-1],replicas[1:]))
+        runsreplicas = set((edge['run'], r1, r2) for edge, r1, r2 in
+            edgereplicas if edge.has_key('run'))
+        return (splitRun(run, r1, r2) for run, r1, r2 in runsreplicas)
+
+    def getConnectingRun(self, basin1, basin2):
+        """
+        """
+        # Ensuring basins are in the right order
+        if basin1 < basin2:
+            basin1, basin2 = basin2, basin1
+
+        allreplicas = self.genConnectingReplicas(basin1, basin2)
+        edgereplicas = (
+            (self.repGraph.graph.edge[r1][r2], r1, r2) for replicas in
+            allreplicas for r1, r2 in izip(replicas[:-1],replicas[1:]))
+        # Need to make sure that each edge is unique
+        runsreplicas = set((edge['run'], r1, r2) for edge, r1, r2 in
+            edgereplicas if edge.has_key('run'))
+        run = combineAllRuns(
+            [splitRun(run, r1, r2) for run, r1, r2 in runsreplicas])
+        connectingRun = splitRun(run, min(basin1), min(basin2))
+        return connectingRun
+
+
+    def splitBasins(self, basins, Ecut, sort=False):
+        """
+        """
+        if sort:
+            basins = sorted(basins)
+
+        for i2, basin2 in enumerate(reversed(basins)):
+            if basin2.energy < Ecut:
+                break
+            else:
+                basin1 = basin2
+
+        replicas = (
+            path for basin2 in basins[-i2::-1] if basin2 != basin1
+            for path in self.genConnectingReplicas(basin1, basin2)).next()
+
+        rephi = replicas[0]
+        for replo in replicas[1:]:
+            if replo.energy < Ecut:
+                break
+            else:
+                rephi = replo
+
+        newrep = self.repGraph.splitReplicaPair(rephi, replo, Ecut)
+
+        if self.repdict.has_key(newrep):
+            return self.repdict[newrep], newrep
+        else:
+            newbasin = self.SuperBasin([newrep])
+            return newbasin, newrep
+
+    def compareBasinPair(self, basin1, basin2, runs=True, paths=False):
+        """
+        Compares the distribution of minima in basin1 and basin2
+        returns the likelihood that that the distributions are the same
+
+        parameters
+        ----------
+        basin1 : SuperBasin
+        basin2 : SuperBasin
+        runs : Bool, optional
+            if true only matches minima connected by nested optimisation runs
+        paths : Bool, optional
+            if true only matches minima connected by paths
+
+        returns
+        -------
+        sig : float
+            the significance
+        cdf1 : CDF
+            the CDF of basin1
+        cdf2 : CDF
+            the CDF of basin2
+        """
+
+        allmin1 = set(self.genAllConnectedMinima(basin1))
+        allmin2 = set(self.genAllConnectedMinima(basin2))
+
+        maxmin1 = max(allmin1, key=lambda m: m.energy)
+        maxmin2 = max(allmin2, key=lambda m: m.energy)
+
+        if maxmin1.energy > basin1.energy or maxmin2.energy > basin2.energy:
+            return 0., None, None
+
+        cdf1 = self.getMinimaCDF(basin1, runs=runs, paths=paths)
+        cdf2 = self.getMinimaCDF(basin2, runs=runs, paths=paths)
+
+        if cdf1 is None or cdf2 is None:
+            return None, cdf1, cdf2
+        else:
+            sig = AndersonDarling.compareDistributions((cdf1, cdf2))[0]
+            return sig, cdf1, cdf2
+
+    @property
+    def disconnectivityGraph(self):
+        """
+        """
+        minima = sorted(self.repGraph.minima())
+        if self.Emax is not None:
+            minima = filter(lambda m: m.energy < self.Emax, minima)
+
+        if set(self._connectgraph.nodes()) != set(minima):
+            self._connectgraph = self.calcConnectivityGraph(self.Emax)
+            self._disconnectgraph = DisconnectivityGraph(self._connectgraph,
+                                                         **self.disconnect_kw)
+            self._disconnectgraph.calculate()
+
+        return self._disconnectgraph
+
+    def recalcDisconnectivityGraph(self):
+        self._connectgraph = self.calcConnectivityGraph(self.Emax)
+        self._disconnectgraph = DisconnectivityGraph(self._connectgraph,
+                                                         **self.disconnect_kw)
+        self._disconnectgraph.calculate()
+
+    def calcConnectivityGraph(self, Emax=None):
+        """ Calculates disconnectivity graph of the BasinGraph where
+        the lowest energy basin that connects two minima is used as the
+        Transition state
+        """
+        minima = sorted(self.repGraph.minima())
+        if Emax is not None:
+            minima = filter(lambda m: m.energy < Emax, minima)
+        pairs = set((m1, m2) for i, m1 in enumerate(minima)
+                    for m2 in minima[:i])
+
+        g = nx.Graph()
+        g.add_nodes_from(minima)
+
+        basins = self.basins()
+        for basin in basins:
+            minlist = sorted(self.getMinimaSet(basin))
+            if pairs:
+                for i, m1 in enumerate(minlist):
+                    for m2 in minlist[:i]:
+                        if (m1, m2) in pairs:
+                            ts = TransitionState(basin.energy, None, m1, m2)
+                            g.add_edge(m1, m2, ts=ts)
+                            pairs.remove((m1,m2))
+
+        return g
+
+    def plot(self, axes=None, **kwargs):
+        """
+        """
+        if axes is None:
+            axes=plt.gca()
+        kwargs.update(axes=axes)
+
+        dg = self.disconnectivityGraph
+        dg.plot(**kwargs)
+        return dg
+
+    def draw(self, energies=True, maxE=0., **kwargs):
+        """
+        """
+        pos = nx.nx_agraph.graphviz_layout(self.graph, prog='dot')
+        if energies:
+            pos = dict((r, (p[0], np.clip(r.energy, None, maxE)))
+                        for r,p in pos.iteritems())
+        else:
+            basin = max(self.basins())
+            pos[basin] = (pos[basin][0], 0)
+            basins = set([basin])
+            while basins:
+                basin = basins.pop()
+                for b in self.graph.successors_iter(basin):
+                    pos[b] = (pos[b][0], pos[basin][1] - 1)
+                    basins.add(b)
+        nx.draw(self.graph, pos, **kwargs)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def bleh(self):
+        #TODO just to separate
+        pass
+
+
+    def genConnectingReplicas2(self, basin1, basin2):
+        G = self.repGraph.graph
+        cutoff = len(G)
+        maxE = max(basin1).energy
+        visitedstacks = [([r], [G.in_edges_iter(basin2)]) for r in basin2]
+        while visitedstacks:
+            visited, stack = visitedstacks.pop()
+            if stack:
+                parents = stack[-1]
+                parent, _ = next(parents, (None, None))
+                if parent is None:
+                    stack.pop()
+                    visited.pop()
+                elif len(visited) < cutoff:
+                    if parent in basin1:
+                        yield (visited + [parent])[::-1]
+                    elif parent not in visited and parent.energy < maxE:
+                        visited.append(parent)
+                        stack.append(G.in_edges_iter(parent))
+                    visitedstacks.insert(0, (visited, stack))
+
+    def updateAllMinimaSets(self):
+        for basin in self.basins():
+            self.getMinimaSet(basin, recalc=True)
+
+    def updateMinima(self):
+        newminima = set(self.repGraph.minima()).difference(self.repdict)
+        for m in newminima:
+            self.SuperBasin([m])
+
+    def updateNode(self, basin):
+        """
+        """
+        minimaset = self.getMinimaSet(basin, recalc=True)
+        basins = (basin for basin in self.basins()
+                  if self.getMinimaSet(basin).intersection(minimaset))
+        self.updateSubgraph(basins)
+
+    def updateSubgraph(self, basins):
+        """ This method makes sures that the connectivity of the basins
+        satisfies the two constraints:
+            1. all edges between basins must be downhill
+            2. any basins that connect to the same minimum must be in
+               the same super basin
+
+        parameters
+        ----------
+        basins : iterable of SuperBasin
+            all the basins that are going to be checked
+        """
+        basins = sorted(basins, reverse=True)
+        minimadict = dict((m, basins[0]) for m in self.getMinimaSet(basins[0]))
+
+        for newbasin in basins[1:]:
+
+            parents = set(minimadict[m] for m in self.getMinimaSet(newbasin))
+            if len(parents) == 1:
+                parent, = parents
+            elif len(parents) > 1:
+                self.mergeBranches(parents)
+                parent = min(b for b in parents if b != newbasin)
+            if parents:
+                predecessors = self.graph.predecessors(newbasin)
+                if parent not in predecessors:
+                    for b in predecessors:
+                        self.graph.remove_edge(b, newbasin)
+                if not self.graph.has_edge(parent, newbasin):
+                    self.connectBasins(parent, newbasin)
+
+            minimadict.update((m, newbasin)
+                              for m in self.getMinimaSet(newbasin))
+
+            assert self.checkBasin(newbasin)
+
+
+
+if False:
+
+    def newMinimum(self, m):
+
+        if m not in self.repdict:
+            print 'new min', m.energy
+            newbasin = self.SuperBasin([m])
+            predecessors = [self.repdict[r]
+                            for r in self.repGraph.genPreceedingReplicas(m)
+                            if self.repdict.has_key(r)]
+            parent = min(predecessors)
+            self.connectBasins(parent, newbasin)
+            for basin in predecessors:
+                self.getMinimaSet(basin).update([m])
+        else:
+            print 'old min', m.energy
+            newbasin = self.repdict[m]
+            predecessors = [self.repdict[r]
+                            for r in self.repGraph.genPreceedingReplicas(m)
+                            if self.repdict.has_key(r)]
+            self.mergeBranches(predecessors)
+
+        self.checkBasin(newbasin)
+
+        return newbasin
+
+    def getBasinReplicas(self, basin):
+        """
+        Returns the lowest energy replicas that are independently
+        connected to the same minima that the replicas in basin
+        are connected to which are higher in energy than the
+        lowest energy replica in the basin.
+        """
+        minima = set(m for r1 in basin for m, f in
+                     self.repGraph.genConnectedMinima(r1))
+        replicas = set(r for m in minima
+                       for r in self.repGraph.graph.predecessors_iter(m))
+        basinreplica = min(basin)
+        basinreplicas = set([basinreplica])
+        while replicas:
+            replica = replicas.pop()
+            if replica > basinreplica:
+                basinreplicas.add(replica)
+            else:
+                basinreplicas.update(
+                    self.repGraph.graph.predecessors_iter(replica))
+        return basinreplicas
+
+    def _updateGraph(self):
+        """
+        """
+        minima = self.repGraph.minima()
+        activenodes = SortedCollection(
+            key=lambda bm: (-max(bm[1]).energy, -len(bm[1])))
+
+        for m in minima:
+            if self.repdict.has_key(m):
+                basin = self.repdict[m]
+            else:
+                basin = SuperBasin([m])
+                self.repdict.update((rep, basin) for rep in [m])
+                self.graph.add_node(basin, energy=basin.energy)
+
+            activenodes.insert((basin, set([m])))
+
+        for basin in self.graph.nodes_iter():
+            self.getMinimaSet(basin, recalc=True)
+
+        while activenodes:
+            basin, mins = activenodes.pop()
+            parent = self.getParent(basin)
+
+
+            nextbasins = sorted(set(
+                self.repdict[r] for r in self.genPreceedingReplicas(basin)
+                if self.repdict.has_key(r)))
+
+            if nextbasins:
+                nextbasin = nextbasins[0]
+
+                if parent is not None and nextbasin != parent:
+                    self.graph.remove_edge(parent, basin)
+
+                assert nextbasin.energy > basin.energy
+
+                if parent is None or nextbasin != parent:
+                    self.connectBasins(nextbasin, basin)
+
+                for i, b1 in enumerate(nextbasins[:-1]):
+                    for b2 in self.graph.predecessors(b1):
+                        if b2 != nextbasins[i+1]:
+                            self.graph.remove_edge(b2, b1)
+                            self.connectBasins(b2, nextbasins[i+1])
+
+                    if not self.graph.has_edge(nextbasins[i+1], b1):
+                        self.connectBasins(nextbasins[i+1], b1)
+
+                activenodes.insert((nextbasin, self.getMinimaSet(nextbasin)))
+
+    def _updateMinimum(self, m):
+        """
+        DOESN'T WORK CURRENTLY!
         """
         replicas = self.repGraph.graph.predecessors(m)
         if m in self.repdict:
@@ -175,33 +936,18 @@ class BasinGraph(object):
 
         self.mergeBranches(basin)
 
-    def updateMinima(self):
+    def _updateMinima(self):
         """
+        DOESN'T WORK CURRENTLY!
         """
         minima = self.repGraph.minima()
         for m in minima:
             self.updateMinimum(m)
 
-    def findEnergySplit(self, basin):
-        Esplits = np.r_[self.repGraph.Esplits, np.inf]
-        return Esplits.searchsorted(basin.energy, side='right')
-
-    def getSiblings(self, parent, basin):
+    def _mergeBranches(self, basin):
         """
+        DOESN'T WORK CURRENTLY!
         """
-        Esplits = np.r_[-np.inf, self.repGraph.Esplits, np.inf]
-
-        i = self.findEnergySplit(basin)
-        siblings = filter(lambda b: self.findEnergySplit(basin) == i,
-                          self.genAllSuccessors(parent))
-
-        return siblings
-
-
-    def mergeBranches(self, basin):
-        """
-        """
-
         # Generating all the basins
         parentreplicas = set(chain(*(self.repGraph.genPreceedingReplicas(r)
                                      for r in basin.replicas)))
@@ -230,26 +976,68 @@ class BasinGraph(object):
         mergedbasins = [basin] + [self.mergeBasins(bs) for bs in groupedbasins]
 
         # Adding/removing edges
-        print len(mergedbasins), 'len mergedbasins'
         for mbasin, pbasin in izip(mergedbasins[:-1], mergedbasins[1:]):
             parents = self.graph.predecessors(mbasin)
-            print len(parents), 'len parents'
             if len(parents) > 0:
                 for p in parents:
                     if p != pbasin:
-                        print 'remove edge', p.energy, mbasin.energy
                         self.graph.remove_edge(p, mbasin)
                     elif p is not pbasin:
-                        print 'relabel', p.energy, pbasin.energy
-                        print p
-                        print pbasin
                         nx.relabel_nodes(self.graph, {parents[0]: pbasin},
                                          copy=False)
             elif not self.graph.has_edge(pbasin, mbasin):
-                print 'connect basins', pbasin.energy, mbasin.energy
                 self.connectBasins(pbasin, mbasin)
 
-    def mergeBasins(self, basins):
+    def isDangling(self, basin, nsamples=2):
+        """ Tests whether there is only less than nsamples replicas in a
+        basin that is connected to nsamples or more replicas
+        """
+        if len(basin.replicas) < nsamples:
+            r, = basin.replicas
+            successors = chain(*(self.repGraph.graph.successors_iter(r)
+                                 for r in basin.replicas))
+            return not iter_minlength(successors, nsamples)
+        else:
+            return False
+
+    def isSingleton(self, basin):
+        """ Tests whether there is only one replica in basin which is
+        connected to less than 2 other replicas
+        """
+        if self.isDangling(basin):
+            r, = basin.replicas
+            return not iter_minlength(self.repGraph.graph.successors_iter(r),2)
+        else:
+            return False
+
+
+    def genConnectingRuns(self, basin, child):
+        """
+        """
+        if basin!=child:
+            for parentrep in basin.replicas:
+                edges = self.repGraph.graph.edge[parentrep]
+                for childrep, attr in edges.iteritems():
+                    if childrep in child.replicas:
+                        if attr.has_key('run'):
+                            yield attr['run']
+
+    def genConnectingPaths(self, basin, child):
+        """
+        """
+        if basin!=child:
+            for parentrep in basin.replicas:
+                edges = self.repGraph.graph.edge[parentrep]
+                for childrep, attr in edges.iteritems():
+                    if childrep in child.replicas:
+                        if attr.has_key('path'):
+                            yield attr['path']
+
+    def findEnergySplit(self, basin):
+        Esplits = np.r_[self.repGraph.Esplits, np.inf]
+        return Esplits.searchsorted(basin.energy, side='right')
+
+    def _mergeBasins(self, basins):
         """
         """
         if len(basins) > 1:
@@ -283,16 +1071,6 @@ class BasinGraph(object):
         for rep in replicas:
             successors.update(self.repGraph.graph.successors(rep))
         return len(successors.difference(replicas))
-
-    def addtoBasin(self, basin, replicas):
-        """
-        """
-        newbasin = basin + SuperBasin(replicas)
-        if basin != newbasin:
-            mapping = {basin: newbasin}
-            self.repdict.update((rep, newbasin) for rep in newbasin.replicas)
-            nx.relabel_nodes(self.graph, mapping)
-        return newbasin
 
     def joinBasins(self, basins):
         """
@@ -376,19 +1154,8 @@ class BasinGraph(object):
                     if rep2.energy >= Esplit:
                         yield rep2
 
-    def genConnectedMinima(self, basin):
-        """
-        """
-        replicas = []
-        for rep in basin.replicas:
-            isparent = any(nx.has_path(self.repGraph.graph, rep, _rep)
-                           for _rep in basin.replicas if rep!=_rep)
-            if not isparent:
-                replicas.append(rep)
-        f = 1./len(replicas)
-        for rep in replicas:
-            for minf in self.repGraph.genConnectedMinima(rep, f):
-                yield minf
+
+
 
     def genConnectedRuns(self, basin, Efilter=None):
         """
@@ -405,21 +1172,6 @@ class BasinGraph(object):
             for run in self.repGraph.genConnectedRuns(rep, Efilter):
                 yield run
 
-    def getConnectedMinima(self, basin, f=1.):
-        """
-        """
-        if type(basin) is Minimum:
-            return [[basin], [f]]
-        else:
-            successors = self.graph.successors(basin)
-            if successors:
-                newf = f / len(successors)
-                return reduce(
-                    lambda x,y: [x[0]+y[0],x[1]+y[1]],
-                    (self.getConnectedMinima(s, newf) for s in successors))
-            else:
-                return []
-
     def getBasinRuns(self, basin):
         """
         """
@@ -433,58 +1185,6 @@ class BasinGraph(object):
         runs = sum((self.repGraph.getConnectedRuns(rep) for rep in startreps),[])
         return runs
 
-    def genAllSuccessors(self, basin):
-        for child in self.graph.successors_iter(basin):
-            for child2 in self.genAllSuccessors(child):
-                yield child2
-            yield child
-
-    def genPaths(self, basin, target):
-        """
-        """
-        paths = []
-        for rep in basin.replicas:
-            paths.append(nx.all_simple_paths(self.repGraph.graph, rep, target))
-        return chain(*paths)
-
-    def getBasinBranchReplicas(self, basin):
-        """Find Replicas connected to a basin within the closest energy cutoff
-        """
-        try:
-            # Finding the highest energy replica connected to the basin
-            Esplits = self.repGraph.Esplits
-            replica = max(self.genConnectedReplicas(basin),
-                          key=lambda rep: rep.energy)
-            iRep = Esplits.searchsorted(replica.energy)
-
-            # Finding Esplit
-            if iRep > 0:
-                Esplit = Esplits[iRep-1]
-            else:
-                Esplit = None
-
-            replicas = list(self.genConnectedReplicas(basin, Esplit=Esplit))
-        except ValueError:
-            # No replicas found
-            Esplit = None
-            replicas = []
-
-        return replicas, Esplit
-
-    def getMinimaCDF(self, basin):
-        """Returns the CDF of the minima connected to basin
-
-        Parameters
-        ----------
-        basin : SuperBasin
-
-        Returns
-        -------
-        cdf : CDF
-            CDF of minima
-        """
-        repCDFs = (self.repGraph.getMinimaCDF(r) for r in basin.replicas)
-        return reduce(lambda x,y:x+y, repCDFs)
 
     def calcHarmonicConstraints(self, parent, basin, minimum, E, c, ndof,
                                 numeric=False):
@@ -504,7 +1204,7 @@ class BasinGraph(object):
         Phi = node['Phi']
         logX = node['logX']
         logX2 = node['logX2']
-        X, X2 = exp(logX), exp(logX2)
+        #X, X2 = exp(logX), exp(logX2)
 
         constraints = dict(E=E, logPhiCon=logPhiCon, Phi=Phi, Emax=Emax[:N],
                            logX=logX, logX2=logX2, nlive=nlive[:N])
@@ -571,8 +1271,8 @@ class BasinGraph(object):
             current = basins.pop()
             currentleft = basinedge[current]
             edgeVols = [(child,
-                         self.calcBranchVolume(current, child, Es=Es, res=res))
-                         for child in self.graph.successors(current)]
+                        self.calcBranchVolume(current, child, Es=Es, res=res))
+                        for child in self.graph.successors(current)]
             edgeVols.sort(key=lambda x: x[1][0][x[1][1].nonzero()[0].max()])
 
             for child, (cEs, cPhi) in edgeVols[:-1]:
@@ -876,12 +1576,3 @@ class BasinGraph(object):
             node['Phi'] = Phi
 
         return node
-
-    def plot(self, energies=True, maxE=0., **kwargs):
-        """
-        """
-        pos = nx.nx_agraph.graphviz_layout(self.graph, prog='dot')
-        if energies:
-            pos = dict((r, (p[0], np.clip(r.energy, None, maxE)))
-                        for r,p in pos.iteritems())
-        nx.draw(self.graph, pos, **kwargs)

@@ -24,7 +24,8 @@ from nestedbasinsampling.disconnectivitydatabase import \
     Minimum, Replica, Run, Database
 from nestedbasinsampling.graphs import \
     ReplicaGraph, BasinGraph, SuperBasin, FunctionGraph
-from nestedbasinsampling.random.stats import CDF, AndersonDarling, AgglomerativeCDFClustering
+from nestedbasinsampling.random.stats import CDF, AndersonDarling,\
+    AgglomerativeCDFClustering
 from nestedbasinsampling.nestedsampling import \
     findRunSplit, joinRuns, combineRuns
 
