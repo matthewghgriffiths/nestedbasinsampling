@@ -15,6 +15,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.schema import Index
 
 from nestedbasinsampling.utils import Signal
+from nestedbasinsampling.integration import calcRunWeights, calcRunAverageValue
 
 __all__ = ["Minimum", "Replica", "Run", "TransitionState", "Database"]
 
@@ -264,8 +265,8 @@ class Run(Base):
     user_data = deferred(Column(PickleType))
     """this can be used to store information about the nested sampling run"""
 
-    def __init__(self, Emax, nlive, parent, child, volume=1.,
-                 stored=None, configs=None, stepsizes=None):
+    def __init__(self, Emax, nlive, parent=None, child=None,
+                 volume=1., stored=None, configs=None, stepsizes=None):
 
         self.Emax = np.array(Emax)
         self.nlive = np.array(nlive, dtype=int)
@@ -307,6 +308,17 @@ class Run(Base):
 
     def __hash__(self):
         return hash(self.Emax.sum())
+
+    def calcWeights(self):
+        """
+        """
+        return calcRunWeights(self)
+
+    def calcAverageValue(self, func, std=True, weights=None):
+        """
+        """
+        weights = self.calcWeights() if weights is None else weights
+        return calcRunAverageValue(weights, func, std=True)
 
 
 class Path(Base):

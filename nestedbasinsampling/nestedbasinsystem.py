@@ -7,10 +7,11 @@ import numpy as np
 from pele.optimize import LBFGS_CPP
 
 from nestedbasinsampling.utils import dict_update_copy
-from nestedbasinsampling.sampling import GMCSampler, DetectStep
+from nestedbasinsampling.sampling.galilean import GalileanSampler
 from nestedbasinsampling.sampling.takestep import random_structure
-from nestedbasinsampling.structure.constraints import BaseConstraint, HardShellConstraint
-from nestedbasinsampling.optimize import AdaptiveNestedOptimizer
+from nestedbasinsampling.structure.constraints import (
+    BaseConstraint, HardShellConstraint)
+from nestedbasinsampling.optimize import NestedOptimizer
 from nestedbasinsampling.storage import Database
 from nestedbasinsampling.graphs import ReplicaGraph
 from nestedbasinsampling.structure.alignment import CompareStructures
@@ -19,10 +20,9 @@ class NestedBasinSystem(object):
     """
     """
     def __init__(self, peleSystem, constraint=None, radius=None,
-                 sampler=GMCSampler, sampler_kw={},
-                 NOPT=AdaptiveNestedOptimizer, nopt_kw={}, nopt_sampler_kw={},
+                 sampler=GalileanSampler, sampler_kw={},
+                 NOPT=NestedOptimizer, nopt_kw={}, nopt_sampler_kw={},
                  Minimizer=LBFGS_CPP, minimizer_kw={},
-                 DetectStep=DetectStep, detectstep_kw={},
                  globalbasin=None, database=None, startseed=0):
 
         self.system = peleSystem
@@ -52,9 +52,6 @@ class NestedBasinSystem(object):
 
         self.Minimizer = Minimizer
         self.minimizer_kw = minimizer_kw
-
-        self.DetectStep = DetectStep
-        self.detectstep_kw = detectstep_kw
 
         self.seed = startseed
         self.set_seed(self.seed)
@@ -100,10 +97,6 @@ class NestedBasinSystem(object):
         sampler = self.sampler(self.pot, **kwargs)
         return sampler
 
-    def get_detect_step(self, sampler_kw={}, **kwargs):
-        kwargs = dict_update_copy(kwargs, self.detectstep_kw)
-        return self.DetectStep(self.get_sampler(**sampler_kw), **kwargs)
-
     def get_nestedbasinsampling(self):
         raise NotImplementedError
 
@@ -122,7 +115,7 @@ class NestedBasinSystem(object):
     def _minimize(self, coords, **kwargs):
         kwargs = dict_update_copy(kwargs, self.minimizer_kw)
         pot = self.get_potential() if 'pot' not in kwargs else kwargs.pop('pot')
-        self._minimizer = self.Quench(coords, pot, **kwargs)
+        self._minimizer = self.Minimizer(coords, pot, **kwargs)
         self._mres = self._minimizer.run()
         return self._mres
 

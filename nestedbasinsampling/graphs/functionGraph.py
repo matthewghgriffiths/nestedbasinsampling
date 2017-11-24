@@ -6,6 +6,8 @@ import numpy as np
 from scipy.integrate import quad
 import networkx as nx
 
+from nestedbasinsampling.storage import Run
+from nestedbasinsampling.integration import calcRunAverageValue
 from nestedbasinsampling.utils import dict_update_copy
 
 class NumericIntegrator(object):
@@ -78,8 +80,8 @@ class FunctionGraph(object):
         self.basinGraph = basinGraph
         self.func = func
 
-        self.basinGraph.calcBasins()
         self.graph = self.copyGraph(self.basinGraph.graph)
+        self.calcBasins()
 
         self.calculated = False
 
@@ -128,35 +130,17 @@ class FunctionGraph(object):
     def calcEdgeIntegral(self, edge, func, std=True):
         """
         """
-        if edge.has_key('run'):
+        if edge.has_key('weights'):
+            weights = edge['weights']
+            return calcRunAverageValue(weights, func, std)
+        elif edge.has_key('run'):
             run = edge['run']
-            Emax = run.Emax
+            return run.calcAverageValue(func, std=std)
         else:
-            Emax = np.array([])
-
-        dF = edge['dF']
-        XdF = edge['XdF']
-        X2dF = edge['X2dF']
-        d2F2 = edge['d2F2']
-        dF2 = edge['dF2']
-        Xd2F2 = edge['Xd2F2']
-        XdF2 = edge['XdF2']
-        X2d2F2 = edge['X2d2F2']
-        X2dF2 = edge['X2dF2']
-
-        fj = np.atleast_2d(self.func(Emax))
-
-        f = fj.dot(dF)
-        Xf = fj.dot(XdF)
-
-        if std:
-            X2f = fj.dot(X2dF)
-            f2 = np.einsum("ij,j,ij->i", fj, d2F2, (fj*dF2).cumsum(1))
-            Xf2 = np.einsum("ij,j,ij->i", fj, Xd2F2, (fj*XdF2).cumsum(1))
-            X2f2 = np.einsum("ij,j,ij->i", fj, X2d2F2, (fj*X2dF2).cumsum(1))
-            return f, Xf, X2f, f2, Xf2, X2f2
-        else:
-            return f, Xf
+            if std:
+                return np.zeros(6,1)
+            else:
+                return np.zeros(2,1)
 
     def calcNodeIntegral(self, parent, basin, std):
 
@@ -173,8 +157,13 @@ class FunctionGraph(object):
                     self.calcEdgeIntegral(edge, self.func, std)
             else:
                 f, Xf = self.calcEdgeIntegral(edge, self.func, std)
-            dvarf = edge['dvarf']
-            dvarX = edge['dvarX']
+
+            if edge.has_key('weights'):
+                weights = edge['weights']
+                dvarf = weights['dvarf']
+                dvarX = weights['dvarX']
+            else:
+                dvarf, dvarX = 0., 0.
         else:
             # If parent does not exist then set appropriate values
             plogX, plogX2 = 0., 0.
@@ -254,9 +243,10 @@ class FunctionGraph(object):
                         fj, f2j, dvarfj = childrenints[childj]
                         pj = branchPi[childj]
                         pipj = branchPiPj[childi][childj]
-                        childint2 = ( childint2 +
-                                      2*(X2X2 * pipj / pi / pj * fi * fj) *
-                                      phi2 / phi**2 )
+                        if pi > 0 or pj > 0:
+                            childint2 = (
+                                childint2 + 2*(X2X2 * pipj / pi / pj * fi * fj)
+                                * phi2 / phi**2 )
 
             childvar =  (childint2 - childint**2)
             # Variance reduction from calculating
@@ -291,7 +281,7 @@ class FunctionGraph(object):
             return fint, fint2, fintstd, dvarfuncint
         else:
             # Adding first moments of child branches
-            funcint += sum(childrenints.itervalues())
+            funcint = funcint + sum(childrenints.itervalues())
             return funcint
 
     def calcIntegral(self, std=True):
@@ -383,3 +373,159 @@ class FunctionGraph(object):
             childrenints[child] = (fi, fi2)
 
         return 0
+
+    def calcConstrainedEdgeValues(self, edge):
+        """
+        """
+
+        if edge.has_key('constraints'):
+
+            constraints = edge['constraints']
+            ns = constraints['nlive'].astype(float)
+            Phi = constraints['Phi']
+            logPhiCon = constraints['logPhiCon']
+            logPhiCon2 = constraints.get('logPhiCon2', 2* logPhiCon)
+            logX  = constraints['logX']
+            logX2  = constraints['logX2']
+
+            logPhi0 = log(Phi) + logX
+            logPhi02 = 2*log(Phi) + logX2
+
+            lognn1 = (np.log(ns) - np.log(ns-1.)).sum()
+            lognn2 = (np.log(ns) - np.log(ns-2.)).sum()
+            logphi1 = ((logPhi0 - logPhiCon - lognn1)/ns.size)
+            logphi2 = ((logPhi02 - logPhiCon2 - lognn2)/ns.size)
+
+            logn1np = (np.log(ns-1.) - np.log(ns) - logphi1).cumsum()
+            logp1n2p2n1 = (np.log(ns-2.) - np.log(ns-1) +
+                           logphi1 - logphi2).cumsum()
+
+            dPhi = np.exp(logPhi0 + logn1np)/(ns-1.)
+            d2Phi2 = np.exp( logn1np - np.log(ns-1.))
+            dPhi2 = 2* np.exp( logPhi02 + logp1n2p2n1 ) / (ns-2.)
+
+            constraints['dPhi'] = dPhi
+            constraints['dPhi2'] = dPhi2
+            constraints['d2Phi2'] = d2Phi2
+
+            return edge
+        else:
+            return self.calcEdgeValues(edge)
+
+    def calcBasins(self):
+        """
+        """
+        # Aggregating and calculating the number and associated weights
+        # of the runs associated with each edge
+        for b1, edges in self.graph.adjacency_iter():
+            for b2, edge in edges.iteritems():
+                runs = self.basinGraph.genConnectingRuns(b1, b2)
+                nruns = sum(r.parent.energy >= b1.energy for r in runs)
+                run = self.basinGraph.getConnectingRun(b1, b2)
+                weights = run.calcWeights()
+
+                edge['run'] = run
+                edge['weights'] = weights
+                edge['nruns'] = nruns
+
+
+        basin0 = self.basinGraph.basins(order=True)[-1]
+        tocalculate = [basin0]
+
+        while tocalculate:
+            basin = tocalculate.pop()
+            self.calcBasinVolumeRatio(basin)
+            self.calcBranchProbabilities(basin)
+            successors = self.graph.successors(basin)
+            tocalculate.extend(successors)
+
+    def calcBranchProbabilities(self, basin):
+        """
+        """
+        node = self.graph.node[basin]
+        successors = self.graph.successors(basin)
+        if successors:
+            nruns = dict((b, attr['nruns'])  for b, attr in
+                         self.graph.edge[basin].iteritems())
+            totruns = float(sum(nruns.itervalues()))
+            if totruns > 0:
+                branchP = dict((b, nrun/totruns) for b, nrun in
+                                nruns.iteritems())
+                branchPiPj = dict((bi,
+                                   dict((bj,0.) for bj in nruns))
+                                   for bi in nruns)
+                MM1 = totruns*(totruns+1.)
+                for bi, nruni in nruns.iteritems():
+                    for bj, nrunj in nruns.iteritems():
+                        if bi is bj:
+                            branchPiPj[bi][bi] = (nruni*(nruni+1.))/MM1
+                        elif branchPiPj[bi][bj] == 0.:
+                            branchPiPj[bi][bj] = nruni*nrunj/MM1
+                            branchPiPj[bj][bi] = branchPiPj[bi][bj]
+
+                node['branchPi'] = branchP
+                node['branchPiPj'] = branchPiPj
+
+                for child in successors:
+                    edge = self.graph.edge[basin][child]
+                    edge['Phi'] = node['Phi'] * node['X'] * branchP[child]
+                    #self.calcEdgeWeights(edge)
+            else:
+                branchP = dict((b, 0.) for b, nrun in
+                                nruns.iteritems())
+                branchPiPj = dict((bi,
+                                   dict((bj,0.) for bj in nruns))
+                                   for bi in nruns)
+                node['branchPi'] = branchP
+                node['branchPiPj'] = branchPiPj
+
+        else:
+            node['branchPi'] = {}
+            node['branchPiPj'] = {}
+
+        return node
+
+    def calcBasinVolumeRatio(self, basin, Phi=1.):
+        """
+        """
+        node = self.graph.node[basin]
+        predecessors = self.graph.predecessors(basin)
+        if predecessors:
+            assert len(predecessors) == 1
+            parent = self.graph.node[predecessors[0]]
+            edge = self.graph.edge[predecessors[0]][basin]
+
+            logXp = parent['logX']
+            logX2p = parent['logX2']
+            branchP = parent['branchPi'][basin]
+            branchP2 = parent['branchPiPj'][basin][basin]
+
+            if edge.has_key('run'):
+                run = edge['run']
+                nj = run.nlive.astype(float)
+            else:
+                nj = np.array([])
+
+            lognjsum = np.log(nj).sum()
+            lognj1sum = np.log(nj + 1).sum()
+            lognj2sum = np.log(nj + 2).sum()
+            logXedge = lognjsum - lognj1sum
+            logX2edge = lognjsum - lognj2sum
+
+            if branchP > 0:
+                node['logX'] = logXp + log(branchP) + logXedge
+                node['logX2'] = logX2p + log(branchP2) + logX2edge
+            else:
+                node['logX'] = -np.inf
+                node['logX2'] = -np.inf
+            node['X'] = exp(node['logX'])
+            node['X2'] = exp(node['logX2'])
+            node['Phi'] = parent['Phi']
+        else:
+            node['logX'] = 0.
+            node['logX2'] = 0.
+            node['X'] = 1.
+            node['X2'] = 1.
+            node['Phi'] = Phi
+
+        return node

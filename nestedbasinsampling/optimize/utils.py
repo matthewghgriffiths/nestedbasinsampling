@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-
+from copy import copy
 from collections import defaultdict
 
 import numpy as np
@@ -50,7 +50,7 @@ class RecordMinimization(object):
 
         if res is None:
             res = Result()
-            res.coords = coords
+            res.coords = coords.copy()
             res.energy, res.grad = self.pot.getEnergyGradient(coords)
             res.nsteps = 0
             res.success = False
@@ -65,4 +65,4 @@ class RecordMinimization(object):
 
     def store(self, **kwargs):
         for key, item in kwargs.iteritems():
-            self.store[key].append(item)
+            self.store[key].append(copy(item))

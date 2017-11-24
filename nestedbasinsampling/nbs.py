@@ -43,8 +43,8 @@ class NestedBasinSampling(object):
     -------
     """
 
-    sampleMinStr = ("NBS > Sampling minima, Ecut = {:8.4g}, "+
-                    "minE = {:8.4g}, logF = {:8.4g}")
+    sampleMinStr = ("NBS > Sampling minima, Ecut = {:10.5g}, "+
+                    "minE = {:10.5g}, logF = {:8.4g}")
     branchStr = ("NBS > Sampling branches, basinE = {:8.4g}, "+
                  "maxChildE = {:8.4g}, n = {:3d}")
     danglingStr = ("NBS > Sampling dangling basins, basinE = {:8.4g}, "+
@@ -86,7 +86,6 @@ class NestedBasinSampling(object):
         self.reject_sig = reject_sig
         self.accept_sig = accept_sig
 
-
         self.splitBranch = splitBranch
         self.nsamples = nsamples
         self.nbranch = nsamples if nbranch is None else nbranch
@@ -117,6 +116,47 @@ class NestedBasinSampling(object):
             basin = self.basinGraph.SuperBasin([replica])
         return replica, basin
 
+    def addMinimum(self, energy, coords):
+        m = self.repGraph.Minimum(energy, coords)
+        basin = self.basinGraph.newMinimum(m)
+        return m, basin
+
+    def createParentBasin(self, basin, basinE, stepsize=None):
+        replica = choice(list(basin.replicas))
+        res = self.sampler(basinE, replica.coords, stepsize=stepsize)
+
+        basinreplica = self.repGraph.Replica(
+            basinE, res.coords, res.stepsize)
+        newreplica = self.repGraph.Replica(
+            res.energy, res.coords, res.stepsize)
+        self.repGraph.Run([res.energy],[1],basinreplica, newreplica)
+        self.repGraph.Path(basinE, newreplica, replica)
+
+        newbasin = self.basinGraph.SuperBasin([basinreplica])
+
+        return newbasin
+
+    def getClosestBasin(self, basin, Ecut):
+        """
+        """
+        subgraph = self.basinGraph.graph.subgraph(chain(
+            [basin], self.basinGraph.genPreceedingBasins(basin),
+            self.basinGraph.genSucceedingBasins(basin)))
+        edges = [(b1, b2) for b1, edges in subgraph.adjacency_iter()
+                 for b2 in edges if b1.energy >= Ecut > b2.energy]
+        basins = [b1 for b1, b2 in edges
+                  if b1.energy >= Ecut >=
+                  self.basinGraph.getEnergyPercentile(b1, self.percentile)]
+        if basins:
+            newbasin = max(basins,
+                        key=lambda b: self.basinGraph.basinOutDegree(b))
+        else:
+            edge = min(edges,
+                       key=lambda b2: min(self.basinGraph.getMinimaSet(b2[0])))
+            newbasin, newrep = self.basinGraph.splitBasins(edge[::-1], Ecut)
+
+        return newbasin
+
     def sampleReplica(self, replica, stepsize=None,
                       nsteps=None, useQuench=None, saveConfigs=None):
         """
@@ -133,16 +173,21 @@ class NestedBasinSampling(object):
         if stepsize is None:
             if getattr(replica, 'stepsize', None) is None:
                 if self.detectStep is None:
-                    stepsize = sampler.stepsize
+                    stepsize = self.sampler.stepsize
                 elif replica.coords is not None:
-                    stepsize = self.detectStep(replica.energy,
-                                               replica.coords)[0]
+                    stepsize, coords, Enew = self.detectStep(replica.energy,
+                                                            replica.coords)[:3]
+                    if self.pot.getEnergy(replica.coords) < Enew:
+                        stepsize = self.detectStep(replica.energy, coords,
+                                                   stepsize=stepsize)[0]
                     if stepsize < self.minstep:
-                        raise SamplingError()
+                        raise SamplingError(
+                           "stepsize too small stepsize = {:8.4g}".format(
+                               stepsize))
 
                     replica.stepsize = stepsize
                 else:
-                    stepsize = sampler.stepsize
+                    stepsize = self.sampler.stepsize
             else:
                 stepsize = replica.stepsize
 
@@ -160,19 +205,23 @@ class NestedBasinSampling(object):
                 coords = self.random_config()
                 E = self.pot.getEnergy(coords)
         else:
-            # If we have already sampled from replica, then we can use
-            # those as a starting point
-            samples = self.repGraph.findSamples(replica)
-            # Choose random starting coords from samples
-            coords = choice(samples) if samples else replica.coords
-            # Continue Markov Chain
+            coords = replica.coords
             try:
-                coords, E, naccept, nreject = sampler.new_point(
-                    Ecut, coords, stepsize=stepsize, nsteps=nsteps)
+                sampleres = self.sampler(Ecut, coords, stepsize=stepsize)
+                coords = sampleres.coords
+                E = sampleres.energy
+                stepsize = sampleres.stepsize
             except SamplingError as e:
                 if self.debug:
                     print "NBS > sampleReplica warning:",  e
                     print "NBS > stepsize = {:8.5g}".format(stepsize)
+
+                if self.detectStep is not None:
+                    naccept = e.kwargs['naccept']
+                    nreject = e.kwargs['nreject']
+                    stepsize = self.detectStep.adjust_stepsize(
+                        naccept, nreject, stepsize)
+
                 return self.sampleReplica(replica, stepsize, nsteps)
 
         start = self.Replica(E, coords, stepsize=stepsize)
@@ -187,27 +236,42 @@ class NestedBasinSampling(object):
             replica, start, res, useQuench=useQuench,
             saveConfigs=saveConfigs, nsave=nsave)
 
+        newbasin = self.basinGraph.newMinimum(m)
+
         self.nsampleReplica += 1
         if self.debug and (self.nsampleReplica % self.iprint) == 0:
             print self.sampleMinStr.format(Ecut, res.energy,
                                            -res.nsteps*np.log(2))
-        return m, run, path
+        return m, newbasin, run, path
+
 
     def sampleBasin(self, basin, useQuench=None,
                     nsamples=None, stepsize=None, nsteps=None):
         """
         """
         nsamples = self.nsamples if nsamples is None else nsamples
-        ms, runs, paths = zip(*
+        ms, newbasins, runs, paths = zip(*
             [self.sampleReplica(choice(list(basin.replicas)), nsteps=nsteps,
                                 useQuench=useQuench, stepsize=stepsize)
             for i in xrange(nsamples)])
 
-        #print basin.energy, self.basinGraph.checkBasin(basin)
-        #print len(ms), nsamples, 'sampleBasin'
-        newbasins = set(self.basinGraph.newMinimum(m) for m in ms)
-
         return ms, newbasins, runs, paths
+
+    def sampleAboveReplica(self, replica, Ethresh, **kwargs):
+        """
+        """
+        # Generating random starting point uniformly below Ethresh
+        res = self.sampler(Ethresh, replica.coords, nsteps=30, nadapt=30)
+
+        # Creating new replica, path and basin associated with this point
+        newreplica = self.repGraph.Replica(
+            res.energy, res.coords, stepsize=res.stepsize)
+        self.repGraph.Path(newreplica.energy, newreplica, replica)
+        newbasin = self.basinGraph.SuperBasin([newreplica])
+
+        # Sampling the new basin
+        self.sampleBasin(newbasin, **kwargs)
+        return newbasin
 
     def groupBasins(self, basins):
         """
@@ -265,27 +329,6 @@ class NestedBasinSampling(object):
 
         return sig, cdf1, cdf2
 
-    def getClosestBasin(self, basin, Ecut):
-        """
-        """
-        subgraph = self.basinGraph.graph.subgraph(chain(
-            [basin], self.basinGraph.genPreceedingBasins(basin),
-            self.basinGraph.genSucceedingBasins(basin)))
-        edges = [(b1, b2) for b1, edges in subgraph.adjacency_iter()
-                 for b2 in edges if b1.energy >= Ecut > b2.energy]
-        basins = [b1 for b1, b2 in edges
-                  if b1.energy >= Ecut >=
-                  self.basinGraph.getEnergyPercentile(b1, self.percentile)]
-        if basins:
-            newbasin = max(basins,
-                        key=lambda b: self.basinGraph.basinOutDegree(b))
-        else:
-            edge = min(edges,
-                       key=lambda b2: min(self.basinGraph.getMinimaSet(b2[0])))
-            newbasin, newrep = self.basinGraph.splitBasins(edge[::-1], Ecut)
-
-        return newbasin
-
     def classifyBasin(self, basin):
         pass
 
@@ -297,13 +340,21 @@ class NestedBasinSampling(object):
         runs = not useQuench
         paths = useQuench
 
-        children = self.basinGraph.graph.successors(basin)
+        children = []
+        newchildren = self.basinGraph.graph.successors(basin)
 
         if self.debug:
             print self.branchStr.format(
-                basin.energy, max(children).energy, len(children))
+                basin.energy, max(newchildren).energy, len(newchildren))
 
-        while len(children) > 1:
+        while len(newchildren) > 1:
+
+            # If we aren't generating any new children basins stop
+            if set(children) == set(newchildren):
+                break
+            else:
+                children = newchildren
+
             # bisecting the branches to the children basins
             for child in children:
                 run = self.basinGraph.getConnectingRun(basin, child)
@@ -315,19 +366,21 @@ class NestedBasinSampling(object):
                 b for b in self.basinGraph.graph.successors(basin)
                 if self.basinGraph.basinOutDegree(
                     b, runs=runs, paths=paths) < self.nsamples)
-            while dangling:
-                if self.debug:
-                    print self.danglingStr.format(
-                        basin.energy, dangling[-1].energy, len(dangling))
 
-                b = dangling.pop()
-                driver.sampleBasin(b,nsamples=nsamples)
+            while dangling:
+
+                for b in dangling:
+                    if self.debug:
+                        print self.danglingStr.format(
+                            basin.energy, b.energy, len(dangling))
+                    driver.sampleBasin(b, nsamples=nsamples)
+
                 dangling = sorted(
                     b for b in self.basinGraph.graph.successors(basin)
                     if self.basinGraph.basinOutDegree(
                         b, runs=runs, paths=paths) < self.nsamples)
 
-            children = self.basinGraph.graph.successors(basin)
+            newchildren = self.basinGraph.graph.successors(basin)
 
             if self.debug and children:
                 print self.branchStr.format(
@@ -441,58 +494,54 @@ class NestedBasinSampling(object):
 ###################################SETUP#######################################
 ###############################################################################
 
-
 from pele.systems import LJCluster
-from nestedbasinsampling.thermodynamics import heat_capacity_func
+from nestedbasinsampling.thermodynamics import heat_capacity_func, partition_func
 
 import seaborn as sns
 import matplotlib.pyplot as plt
 from plottingfuncs.plotting import ax3d
 
-natoms = 13
+natoms = 31
 system = LJCluster(natoms)
 radius =  float(natoms) ** (1. / 3)
 
-acc_ratio = 0.9
+acc_ratio = 0.25
 
 nopt_kw = dict(
     tol=1e-1, alternate_stop_criterion=None, events=None, iprint=-1,
-    nsteps=10000, stepsize=0.3, debug=True, quench=lbfgs_cpp,
-    quenchtol=1e-6, step_factor=1.1, frequency=60, acc_ratio=acc_ratio,
-    quench_kw=dict(nsteps=1000))
+    maxsteps=10000, stepsize=0.1, debug=True, quench=lbfgs_cpp,
+    quenchtol=1e-6, quench_kw=dict(nsteps=1000))
 
-nopt_sampler_kw = dict(
-    nsteps=40, maxreject=200)
+nopt_sampler_kw = dict(nsteps=15, nadapt=15, maxreject=200, acc_ratio=acc_ratio)
 
-sampler_kw = dict(
-    nsteps=1000, maxreject=5000, fixConstraint=True)
-
-detectstep_kw = dict(
-    nsteps=2, acc_ratio=acc_ratio, nadapt=3000, step_factor=1.5, stepsize=0.1)
+sampler_kw = dict(nsteps=30, nadapt=30, maxreject=100,
+                  acc_ratio=acc_ratio, fixConstraint=True)
 
 nbsystem = NestedBasinSystem(
     system, radius=radius, nopt_kw=nopt_kw, nopt_sampler_kw=nopt_sampler_kw,
-    sampler_kw=sampler_kw, detectstep_kw=detectstep_kw, startseed=1)
+    sampler_kw=sampler_kw, startseed=1)
 
 pot = nbsystem.get_potential()
 nopt = nbsystem.get_nestedoptimizer()
 sampler = nbsystem.get_sampler()
 quench = nbsystem.get_minimizer()
-detectstep = nbsystem.get_detect_step()
 rand_config = nbsystem.get_random_configuration()
 compare = nbsystem.get_compare_structures()
-db = nbsystem.get_database(compareMinima=compare)
+db = nbsystem.get_database(compareMinima=compare, accuracy=1e-2)
 repGraph = nbsystem.get_replica_graph(database=db)
 
-Ts = np.logspace(-2,2,50)
-func = lambda E: heat_capacity_func(E, Ts)
+Ts = np.logspace(-2,0,50)
+Emin = -133.
+Cfunc = lambda E: heat_capacity_func(E, Ts, Emin=Emin)
+Pfunc = lambda E: partition_func(E, Ts, Emin=Emin)
 
-nbs_kw = dict(useQuench=False, nsamples=10, nbranch=10,
-              accept_sig=0.2, reject_sig=1e-3, func=func, debug=True)
+nbs_kw = dict(useQuench=False, nsamples=5, nbranch=5, splitBranch=0.2,
+              accept_sig=0.2, reject_sig=1e-3, debug=True)
 
-driver = NestedBasinSampling(pot, nopt, sampler, repGraph,
-                             quench=quench, detectStep=detectstep,
-                             random_config=rand_config, **nbs_kw)
+driver = NestedBasinSampling(
+    pot, nopt, sampler, repGraph, quench=quench,
+    random_config=rand_config, func=Cfunc, **nbs_kw)
+
 basinGraph = driver.basinGraph
 
 ###############################################################################
@@ -503,28 +552,234 @@ self = driver
 plt.ion()
 
 ###### Finding bottom of global basin #########
-replica, basin = driver.globalReplicaBasin()
+#replica, basin = driver.globalReplicaBasin()
+
+#newbasins = driver.sampleBasin(basin, nsamples=1)[1]
+#driver.findBasinBranches(basin)
+
+if 1:
+    gmin = np.array(
+          [-0.57661039, -0.20922621,  1.02839484,  0.03718986, -0.56960802,
+            0.19065885, -0.74485456, -0.29376893, -0.5330444 ,  0.51589413,
+           -0.38547324,  1.16293184, -0.97689163,  0.82980011,  1.01651968,
+            0.44237781,  0.76453522, -1.43379792, -1.58109833,  0.37403757,
+           -0.75244974, -1.17803492,  1.13214206, -0.03827416,  0.11377805,
+           -0.9574589 , -0.85655503, -0.11345962, -1.63036576, -0.00340774,
+            0.81480327, -1.25699092,  0.52149634,  1.03562717, -0.58539809,
+           -0.33122239, -0.55082335,  0.76714013, -0.87832192,  1.51033404,
+           -0.38728163,  0.64810546,  1.24889779,  0.47289277, -0.66473407,
+           -0.28650994, -0.12978066, -1.5346621 ,  0.2469026 ,  0.08722791,
+           -0.6274991 , -1.76578221, -0.68578055, -0.42063516, -0.17612401,
+           -1.24814226,  1.04274587,  1.2046335 ,  0.48044108,  1.28486289,
+           -1.37443511,  0.07223048,  0.30133618, -0.24371389,  1.48979545,
+            0.48682862, -0.35623627,  0.45130852,  0.17777359,  0.11400512,
+            0.65740392,  1.14976934,  0.85312099, -0.30131762, -1.42034537,
+            0.37785698,  1.1214737 , -0.35276543, -0.97313091, -0.96912921,
+            0.31447945,  1.72926618,  0.67038536,  0.31580514,  0.85445676,
+            1.31467926,  0.62662403, -0.91492618, -1.35463763, -0.73063174,
+            0.71348693,  0.27886602,  0.31001412])
+
+    m, basin = driver.addMinimum(pot.getEnergy(gmin), gmin)
+
+#nextm = repGraph.minima()[1]
+#Ediff = nextm.energy - m.energy
 
 
-newbasins = driver.sampleBasin(basin)[1]
+self.sampleAboveReplica(m, -123., nsamples=5)
+
+raise
+
+#Ediff = .2
+#minima = set([m])
+#Ecut = -121
+#
+#res = self.sampler(Ecut, m.coords, nsteps=30, nadapt=30, stepsize=0.1)
+#Enew, coords, stepsize = res.energy, res.coords, res.stepsize
+#newReplica = m
+#
+#def sampleEnergyThresh(self, basin, Ethresh, **kwargs):
+#    replica = min(basin)
+#    res = self.sampler(Ethresh, replica.coords, nsteps=30, nadapt=30)
+#    newreplica = self.repGraph.Replica(
+#        res.energy, res.coords, stepsize=res.stepsize)
+#    newbasin = self.basinGraph.SuperBasin([newreplica])
+#    basinms, newbasins, run, path = self.sampleBasin(newbasin, **kwargs)
+#    return newbasin
+
+
+
+while True:
+    res = self.sampler(Ecut, m.coords,
+                       nsteps=30, nadapt=30, stepsize=stepsize)
+    Enew, coords, stepsize = res.energy, res.coords, res.stepsize
+    lastReplica = newReplica
+    newReplica = self.repGraph.Replica(Enew, coords, stepsize=stepsize)
+    self.repGraph.Path(newReplica.energy, newReplica, lastReplica)
+    newm, newbasin, run, path = self.sampleReplica(newReplica, useQuench=False)
+    if m != newm:
+        newbasin1 = self.basinGraph.SuperBasin([lastReplica])
+        newbasin2 = self.basinGraph.SuperBasin([newReplica])
+        print 'found branch'
+        raise
+        basinms, newbasins, run, path = self.sampleBasin(newbasin1, useQuench=False, nsamples=10)
+        basinms, newbasins, run, path = self.sampleBasin(newbasin2, useQuench=False, nsamples=10)
+        while True:
+            basinms, newbasins, run, path = self.sampleBasin(newbasin2, useQuench=False,
+                                                             nsamples=1)
+            if m in basinms:
+                break
+        print 'connected'
+        break
+    else:
+        lastEcut = Ecut
+        Ecut += Ediff
+
+raise
+
+
+minima.update(ms)
+
+m = ms[0]
+basin = newbasin
+
+Ecut = m.energy + Ediff
+res = self.sampler(Ecut, m.coords, stepsize=0.1)
+Enew, coords, stepsize = res.energy, res.coords, res.stepsize
+
+raise
+
+while True:
+    res = self.sampler(Ecut, m.coords,
+                       nsteps=100, nadapt=15, stepsize=stepsize)
+    Enew, coords, stepsize = res.energy, res.coords, res.stepsize
+    newReplica = self.repGraph.Replica(Enew, coords, stepsize=stepsize)
+    mnew, mbasin, run, path = self.sampleReplica(newReplica)
+    if mnew != m:
+        while True:
+            m2, mbasin, run, path = self.sampleReplica(newReplica)
+            if m2 == mnew:
+                break
+        print 'found branch'
+        break
+    else:
+        Ecut += Ediff
+
+raise
+
+basins = basinGraph.basins()
+basins = [b for b in basinGraph.basins() if basinGraph.graph.out_degree(b) > 5]
+[basinGraph.graph.out_degree(b) for b in basinGraph.basins()]
+
+
+basins = [b for b in basinGraph.basins() if basinGraph.graph.out_degree(b) > 1]
+newbasin = max(basins)
+driver.findBasinBranches(newbasin)
+
+raise
+
+
+
+
+
+
+
+
+print 'start'
+newbasins = driver.sampleBasin(basin, nsamples=5)[1]
+
+for run in repGraph.runs():
+    plt.semilogy(run.Emax-run.Emax.min())
+
+minima = basinGraph.getMinimaSet(basin)
+mbasin = min(basinGraph.genSucceedingBasins(basin))
+bmin = min(minima)
+
+raise
+
+splitbasin = mbasin
+
+run = basinGraph.getConnectingRun(basin, splitbasin)
+
+Ecut = findRunSplit(run, self.splitBranch)[0]
+
+edge = (splitbasin, basin)
+newbasin, newrep = self.basinGraph.splitBasins(edge, Ecut)
+
+res = driver.sampleBasin(newbasin, nsamples=1)
+
+
+Ts = np.logspace(-2,.3,50)
+Emin = -133.
+Cfunc = lambda E: heat_capacity_func(E, Ts, Emin=Emin)
+Pfunc = lambda E: partition_func(E, Ts, Emin=Emin)
+
+fgraph = FunctionGraph(basinGraph, Cfunc)
+Zgraph = FunctionGraph(basinGraph, Pfunc)
+
+plt.plot(Ts, fgraph.integral/Zgraph.integral)
+
+raise
 
 driver.findBasinBranches(basin)
 
 basinGraph.plot()
 
+basins = basinGraph.basins()
+
+basins = [b for b in basins if basinGraph.graph.out_degree(b) > 1]
+cdfs = [basinGraph.getMinimaCDF(b) for b in basins]
+
+agglom = AgglomerativeCDFClustering(cdfs)
+
+sig, clusteri, clustercdfs = agglom.getMaxLikelihood()
+
+closebasins = [basins[i] for i in clusteri[-1]]
+
+closecoords = []
+for b in closebasins:
+    r,= b
+    if r.coords is not None:
+        closecoords.append(r.coords.copy())
+
+for x in closecoords:
+    for y in closecoords:
+        print bnb(x, y, niter=100)[0]
+
+x, y, z = closecoords
+d, x, y = bnb(x, y, niter=1000)[:3]
+fig, ax = ax3d()
+ax.scatter(*x.reshape(-1,3).T)
+ax.scatter(*y.reshape(-1,3).T, c='r')
+#basins = basinGraph.basins()
+#basin = max(b for b in basins if basinGraph.graph.out_degree(b) > 1)
+#driver.findBasinBranches(basin)
+
+#run graphs/functionGraph.py
+
+Ts = np.logspace(-2,.3,50)
+Emin = -133.
+Cfunc = lambda E: heat_capacity_func(E, Ts, Emin=Emin)
+Pfunc = lambda E: partition_func(E, Ts, Emin=Emin)
+
+fgraph = FunctionGraph(basinGraph, Cfunc)
+Zgraph = FunctionGraph(basinGraph, Pfunc)
+
+plt.plot(Ts, fgraph.integral/Zgraph.integral)
+
+b0, b1 = basinGraph.basins()[-2:-4:-1]
+edge = fgraph.graph.edge[b0][b1]
 
 
 
+if False:
 
+    self = basinGraph
 
-
-
-
-
-
-
-
-
+    for b1, edges in self.basinGraph.graph.adjacency_iter():
+        for b2, edge in edges.iteritems():
+            run = self.basinGraph.getConnectingRun(b1, b2)
+            edge['run'] = run
+            edge['weights'] = run.calcWeights()
 
 
 

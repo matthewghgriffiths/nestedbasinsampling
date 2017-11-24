@@ -18,7 +18,7 @@ from nestedbasinsampling.sampling.stats import AndersonDarling, CDF
 from nestedbasinsampling.nestedsampling import combineAllRuns, splitRun
 from nestedbasinsampling.utils import iter_minlength
 from nestedbasinsampling.utils.sortedcollection import SortedCollection
-from .functionGraph import NumericIntegrator
+#from .functionGraph import NumericIntegrator
 
 @total_ordering
 class SuperBasin(object):
@@ -121,7 +121,8 @@ class BasinGraph(object):
         return basin
 
     def newMinimum(self, m):
-
+        """
+        """
         if m not in self.repdict:
             newbasin = self.SuperBasin([m])
         else:
@@ -139,6 +140,7 @@ class BasinGraph(object):
         self.checkBasin(newbasin)
 
         return newbasin
+#        return None
 
     def connectBasins(self, parent, basin, calcruns=False):
         """
@@ -360,10 +362,8 @@ class BasinGraph(object):
                 return True
             else:
                 minima = self.getMinimaSet(basin, recalc=True)
-                childminima = reduce(
-                    lambda x, y: x.union(y),
-                    (self.getMinimaSet(b, recalc=True)
-                     for b in successors) )
+                childminima = set(m for b in successors
+                                  for m in self.getMinimaSet(b, recalc=True))
                 if not minima.issuperset(childminima):
                     print 'failure!!!!', basin.energy
                     print "superset", len(minima), len(childminima), len(minima.difference(childminima))
@@ -454,6 +454,10 @@ class BasinGraph(object):
             [mf for mf in self.repGraph.genConnectedMinima(
                 r, runs=runs, paths=paths)]
             for r in self.genSuccessorReplicas(basin)]
+
+        for i, minfs in enumerate(childminima):
+            tot = sum(f for m, f in minfs)
+            childminima[i] = [(m, f/tot) for m, f in minfs]
 
         n = sum(1 for minima in childminima if minima)
         if n:
@@ -698,9 +702,12 @@ class BasinGraph(object):
 
         return g
 
-    def plot(self, axes=None, **kwargs):
+    def plot(self, recalc=False, axes=None, **kwargs):
         """
         """
+        if recalc:
+            self.recalcDisconnectivityGraph()
+
         if axes is None:
             axes=plt.gca()
         kwargs.update(axes=axes)
@@ -736,14 +743,6 @@ class BasinGraph(object):
 
 
 
-
-
-
-
-
-    def bleh(self):
-        #TODO just to separate
-        pass
 
 
     def genConnectingReplicas2(self, basin1, basin2):

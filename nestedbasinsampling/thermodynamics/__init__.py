@@ -3,4 +3,4 @@
 __all__ = ['heatcapacity']
 
 
-from .heatcapacity import heat_capacity_func
+from .heatcapacity import *

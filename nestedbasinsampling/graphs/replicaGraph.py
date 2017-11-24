@@ -66,6 +66,10 @@ class ReplicaGraph(object):
 
         self.on_minimum_added = []
 
+
+        self.Emax = None
+        self.disconnect_kw = {}
+
         # Create new graph from database
         self.loadFromDatabase(database, newGraph=True)
 
@@ -76,6 +80,7 @@ class ReplicaGraph(object):
         if newGraph:
             self.graph = nx.DiGraph()
             self.tree = nx.DiGraph()
+            self._connectgraph = nx.Graph()
 
         self.database = database
 
@@ -244,6 +249,8 @@ class ReplicaGraph(object):
         if not useQuench:
             nlive = (res.nlive if hasattr(res, 'nlive') else
                      np.ones_like(Es, dtype=int))
+            Es = res.Emax
+            argsort = np.arange(Es.size)
         else:
             if not (Es[:-1] > Es[1:]).all():
                 argsort = Es.size - Es[::-1].argsort()[::-1] - 1
@@ -643,15 +650,16 @@ class ReplicaGraph(object):
         """
         """
         g = nx.Graph()
-        g.add_nodes_from(self.tree.nodes())
 
-        replicas = set([max(self.replicas())])
+        minima = self.minima()
+        setdict = dict((m, set([m])) for m in minima)
+        replicas = SortedCollection(minima, key=lambda r: -r.energy)
+
         while replicas:
             replica = replicas.pop()
             successors = self.tree.successors(replica)
-            if len(successors) == 1:
-                replicas.update(successors)
-            else:
+
+            if len(successors) > 1:
                 minima = [list(self.genAllConnectedMinima(r))
                           for r in successors]
                 for i, m1s in enumerate(minima):
@@ -661,22 +669,50 @@ class ReplicaGraph(object):
                                 ts = TransitionState(replica.energy, None,
                                                      m1, m2)
                                 g.add_edge(m1, m2, ts=ts)
+                setdict[replica] = set(m for ms in minima for m in ms)
+            elif len(successors) == 1:
+                setdict[replica] = setdict[successors[0]]
 
+            parents = self.tree.predecessors(replica)
+            if parents:
+                replicas.insert(parents[0])
         return g
 
-    def disconnectivityGraph(self, g=None, **kwargs):
+
+    def calcDisconnectivityGraph(self, g=None, **kwargs):
+        """
+        """
         g = self.calcConnectivityGraph(self) if g is None else g
         dg = DisconnectivityGraph(g, **kwargs)
         dg.calculate()
         return dg
 
+    @property
+    def disconnectivityGraph(self):
+        """
+        """
+        minima = self.minima()
+        if self.Emax is not None:
+            minima = filter(lambda m: m.energy < self.Emax, minima)
 
-    def plot(self, energies=True, maxE=0., arrows=False, node_size=5, **kwargs):
-        pos = nx.nx_agraph.graphviz_layout(self.graph, prog='dot')
-        if energies:
-            pos = dict((r, (p[0], np.clip(r.energy, None, maxE)))
-                        for r,p in pos.iteritems())
-        nx.draw(self.graph, pos, arrows=arrows, node_size=node_size, **kwargs)
+        if set(self._connectgraph.nodes()) != set(minima):
+            self._connectgraph = self.calcConnectivityGraph(self.Emax)
+            self._disconnectgraph = DisconnectivityGraph(self._connectgraph,
+                                                         **self.disconnect_kw)
+            self._disconnectgraph.calculate()
+
+        return self._disconnectgraph
+
+    def plot(self, recalc=False, axes=None, **kwargs):
+        """
+        """
+        if axes is None:
+            axes=plt.gca()
+        kwargs.update(axes=axes)
+
+        dg = self.calcDisconnectivityGraph() if recalc else self.disconnectivityGraph
+        dg.plot(**kwargs)
+        return dg
 
     def draw(self, tree=True,
              energies=True, maxE=0., arrows=False, node_size=5, **kwargs):

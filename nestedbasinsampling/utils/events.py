@@ -86,34 +86,3 @@ class Signal(object):
         self._functions.clear()
         self._methods.clear()
 
-
-class Replica(object):
-    """object to represent the state of a system
-
-    also attached is some additional information
-
-    Parameters
-    ----------
-    x : array
-        the structural coordinates
-    energy : float
-        the energy of the structure
-    niter : int
-        the number of MC iterations this structure has already been through
-    from_random : bool
-        if true, this replica started life as a completely random configuration
-    """
-    def __init__(self, x, energy, niter=0, from_random=True):
-        self.x = x.copy()
-        self.energy = float(energy)
-        self.niter = niter
-        self.from_random = from_random
-
-    def copy(self):
-        """return a complete copy of self"""
-        return copy.deepcopy(self)
-
-    def __repr__(self):
-        repstr = "Replica(x.shape={},energy=({:10.12g}))"
-        return repstr.format(repr(self.x.shape), self.energy)
-
