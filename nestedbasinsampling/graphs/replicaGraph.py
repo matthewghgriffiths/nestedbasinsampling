@@ -1,25 +1,20 @@
 # -*- coding: utf-8 -*-
 
 from itertools import chain, izip, groupby
-
-from math import exp, log, sqrt
-
 import numpy as np
-
-from scipy.special import gammaln
-from scipy.integrate import quad
 
 import networkx as nx
 
 import matplotlib.pyplot as plt
 
-
 from pele.utils.disconnectivity_graph import DisconnectivityGraph
 
-from nestedbasinsampling.storage import Minimum, Replica, Run, Path, TransitionState, Database
+from nestedbasinsampling.storage import (
+    Minimum, Replica, Run, Path, TransitionState, Database)
 from nestedbasinsampling.sampling.stats import AndersonDarling, CDF
-from nestedbasinsampling.nestedsampling import findRunSplit, joinRuns, combineAllRuns
-from nestedbasinsampling.utils import dict_update_copy, iter_minlength
+from nestedbasinsampling.nestedsampling.combine import combineAllRuns
+from nestedbasinsampling.utils import (
+    dict_update_copy, iter_minlength, len_iter, GraphError)
 from nestedbasinsampling.utils.sortedcollection import SortedCollection
 
 class ReplicaGraph(object):
@@ -83,6 +78,8 @@ class ReplicaGraph(object):
             self._connectgraph = nx.Graph()
 
         self.database = database
+        self.runs = self.database.runs
+        self.paths = self.database.paths
 
         [self.addMinimum(m) for m in self.database.minima()]
         [self.addReplica(rep) for rep in self.database.replicas()]
@@ -145,31 +142,6 @@ class ReplicaGraph(object):
         else:
             return [n for n in self.graph.nodes() if type(n) is Minimum]
 
-    def runs(self, Esplit=None):
-        edges = self.graph.edge
-        runs = []
-        for edges2 in edges.itervalues():
-            for attr in edges2.itervalues():
-                if 'run' in attr:
-                    run = attr['run']
-                    if Esplit is None:
-                        runs.append(attr['run'])
-                    else:
-                        Emax = run.Emax
-                        if len(Emax) > 1:
-                            if Emax[0] > Esplit and Emax[-1] <= Esplit:
-                                runs.append(run)
-        return runs
-
-    def paths(self):
-        edges = self.graph.edge
-        paths = []
-        for edges2 in edges.itervalues():
-            for attr in edges2.itervalues():
-                if 'path' in attr:
-                    paths.append(attr['path'])
-        return paths
-
     def Minimum(self, energy, coords):
         m = self.NewMin(energy, coords)
         self.addMinimum(m)
@@ -190,14 +162,33 @@ class ReplicaGraph(object):
         self.addRun(run, intermediates)
         return run
 
-    def Path(self, energy, parent, child, intermediates=[],
-             energies=None, stored=None, configs=None):
+    def Path(self, energy, parent, child, intermediates=[], energies=None,
+             stored=None, configs=None, quench=False, minimum=False, **kwargs):
         """
         """
-        path = self.NewPath(energy, parent, child,
-                            energies=energies, stored=stored, configs=configs)
-        self.addPath(path, intermediates=intermediates)
+        path = self.NewPath(
+            energy, parent, child, energies=energies,
+            stored=stored, configs=configs, quench=quench, minimum=minimum)
+        self.addPath(path, intermediates=intermediates, **kwargs)
         return path
+
+    @property
+    def Esplits(self):
+        prop = self.database.get_property("Esplits")
+        if prop is None:
+            return np.array([])
+        else:
+            return prop.value
+
+    @Esplits.setter
+    def Esplits(self, Esplits):
+        prop = self.database.get_property('Esplits')
+        if prop is not None:
+            prop.value = Esplits
+            self.database.session.commit()
+        else:
+            self.database.add_property('Esplits', Esplits)
+
 
     def addMinimum(self, m):
         """
@@ -212,7 +203,6 @@ class ReplicaGraph(object):
                 self.graph.add_edge(
                     r1, r2, energy=r1.energy, Emin=r2.energy)
         """
-
         for event in self.on_minimum_added:
             event(m)
 
@@ -222,14 +212,20 @@ class ReplicaGraph(object):
         self.graph.add_node(replica, energy=replica.energy)
         self.tree.add_node(replica, energy=replica.energy)
 
-    def addPath(self, path, intermediates=[]):
+    def addPath(self, path, intermediates=[], **kwargs):
         """Adds path to graph will connect parent to child
         through intermediates"""
         middle = sorted(intermediates)
         tojoin = [path.parent] + middle + [path.child]
+        if path.quench:
+            kwargs['quench'] = True
+        elif path.minimum:
+            kwargs['minimum'] = True
         for r1, r2 in izip(tojoin[:-1], tojoin[1:]):
-            self.graph.add_edge(r1, r2, path=path,
-                                energy=r1.energy, Emin=r2.energy)
+            self.graph.add_edge(
+                r1, r2, path=path, energy=r1.energy, Emin=r2.energy, **kwargs)
+            self.tree.add_edge(r1, r2)
+            #self.connectTreeReplicas(r1, r2)
 
     def addRun(self, run, intermediates=[]):
         """Adds run to graph will connect parent to child
@@ -238,32 +234,103 @@ class ReplicaGraph(object):
         tojoin = [run.parent] + middle + [run.child]
         for r1, r2 in izip(tojoin[:-1], tojoin[1:]):
             self.graph.add_edge(r1, r2, run=run,
-                                energy=r1.energy,Emin=r2.energy)
+                                energy=run.parent.energy,
+                                Emin=run.child.energy)
+            self.tree.add_edge(r1, r2)
+            #self.connectTreeReplicas(r1, r2)
 
-    def addMinimisation(self, replica, startrep, res,
+    def addPartialRun(self, replica, res, saveConfigs=False, nsave=1):
+        """
+        """
+        Es = res.Emax
+        nlive = (res.nlive if hasattr(res, 'nlive') else
+                 np.ones_like(Es, dtype=int))
+
+        stepsizes, configs, stored = None, None, None
+        if nsave:
+            if hasattr(res, 'stepsize'):
+                stepsizes = res.stepsize[::nsave]
+                n = res.stepsize.size
+            if saveConfigs and hasattr(res, 'coords_s'):
+                configs = res.coords_s[::nsave]
+                n = res.coords_s.size
+            if n is not None:
+                stored = np.arange(0,n,nsave)
+
+        if Es.size:
+            child = self.Replica(res.energy, res.coords, stepsize=res.stepsize)
+            run = self.Run(Es, nlive, replica, child,
+                           stored=stored, stepsizes=stepsizes, configs=configs)
+            return child, run
+        else:
+            return None, None
+
+    def addFullRun(self, replica, res, saveConfigs=False, nsave=1):
+        Es = res.Emax
+        nlive = (res.nlive if hasattr(res, 'nlive') else
+                 np.ones_like(Es, dtype=int))
+
+        stepsizes, configs, stored = None, None, None
+        if nsave:
+            if hasattr(res, 'stepsize'):
+                stepsizes = res.stepsize[::nsave]
+                n = res.stepsize.size
+            if saveConfigs and hasattr(res, 'coords_s'):
+                configs = res.coords_s[::nsave]
+                n = res.coords_s.size
+                childcoords = res.coords_s[-1]
+            else:
+                childcoords = None
+            if n is not None:
+                stored = np.arange(0,n,nsave)
+
+        if Es.size:
+            child = self.Replica(Es[-1], childcoords, res.stepsize)
+            m = self.Minimum(res.energy, res.coords)
+            run = self.Run(Es, nlive, replica, child,
+                           stored=stored, stepsizes=stepsizes, configs=configs)
+            path = self.Path(child.energy, child, m, minimum=True)
+            # Updating tree structure
+            self.tree.add_edge(replica, child)
+            self.connectTreeReplicas(child, m)
+            return child, m, run, path
+        else:
+            return None, None, None, None
+
+
+    def addMinimization(self, replica, startrep, res,
                         useQuench=False, saveConfigs=False, nsave=1):
         """
         """
         Es = res.energy_s if hasattr(res, 'energy_s') else None
-        argsort = np.arange(Es.size)
-        if not useQuench:
-            nlive = (res.nlive if hasattr(res, 'nlive') else
-                     np.ones_like(Es, dtype=int))
-            Es = res.Emax
-            argsort = np.arange(Es.size)
-        else:
-            if not (Es[:-1] > Es[1:]).all():
-                argsort = Es.size - Es[::-1].argsort()[::-1] - 1
-                Es = Es[argsort]
+        argsort = np.array([], int) if Es is None else np.arange(Es.size)
 
         stepsizes = None
         configs = None
         stored = None
+        n = None
+
+        if not useQuench:
+            Es = res.Emax
+            nlive = (res.nlive if hasattr(res, 'nlive') else
+                     np.ones_like(Es, dtype=int))
+            argsort = np.arange(Es.size)
+            if nsave:
+                if hasattr(res, 'stepsize'):
+                    stepsizes = res.stepsize[argsort[::nsave]]
+                    n = res.stepsize.size
+                if saveConfigs and hasattr(res, 'coords_s'):
+                    configs = res.coords_s[argsort[::nsave]]
+                    n = res.coords_s.size
+                if n is not None:
+                    stored = np.arange(0,n,nsave)
+        else:
+            if Es is not None:
+                if not (Es[:-1] > Es[1:]).all():
+                    argsort = Es.size - Es[::-1].argsort()[::-1] - 1
+                    Es = Es[argsort]
+
         if nsave:
-            n = None
-            if hasattr(res, 'stepsize'):
-                stepsizes = res.stepsize[argsort[::nsave]]
-                n = res.stepsize.size
             if saveConfigs and hasattr(res, 'coords_s'):
                 configs = res.coords_s[argsort[::nsave]]
                 n = res.coords_s.size
@@ -271,47 +338,57 @@ class ReplicaGraph(object):
                 stored = np.arange(0,n,nsave)
 
         m = self.Minimum(res.energy, res.coords)
-        repcoords = res.coords if configs is None else configs[-1]
 
-        childE = Es[-1]
-        i = -1
-        while childE <= m.energy:
-            i -= 1
-            childE = Es[i]
-
-        child = self.Replica(childE, repcoords)
         if useQuench:
             run = self.Run([startrep.energy], [1], replica, startrep)
-            path = self.Path(startrep.energy, startrep, m,
-                             intermediates=[child],
+            path = self.Path(startrep.energy, startrep, m, quench=True,
                              stored=stored, energies=Es, configs=configs)
+            self.tree.add_edge(replica, startrep)
+            self.connectTreeReplicas(startrep, m)
         else:
-            # Include startrep in nested optimisation run
+            repcoords = res.coords if configs is None else configs[-1]
+            child = self.Replica(Es[-1], repcoords)
+
             Es = np.r_[startrep.energy, Es]
             nlive = np.r_[1, nlive]
             if stored.size:
                 stored += 1
+
             run = self.Run(Es, nlive, replica, child,
                            intermediates=[startrep], stored=stored,
                            stepsizes=stepsizes, configs=configs)
-            path = self.Path(child.energy, child, m)
+            path = self.Path(child.energy, child, m, minimum=True)
 
-        # Updating tree structure
-        self.tree.add_edge(replica, startrep)
-        self.tree.add_edge(startrep, child)
-        self.connectTreeReplicas(child, m)
+            # Updating tree structure
+            self.tree.add_edge(replica, startrep)
+            self.tree.add_edge(startrep, child)
+            self.connectTreeReplicas(child, m)
 
-        if child not in self.genReplica2Root(m):
-            raise
+        return startrep, m, run, path
 
-        return child, m, run, path
-
-    def connectTreeReplicas(self, parent, child):
+    def connectTreeReplicas(self, parent, child, check=True):
+        """ This updates the structure of self.tree such that parent and
+        child are connected on the the tree but self.tree maintains
+        its topology as a tree
         """
-        """
+        if child > parent:
+            parent, child = child, parent
+
+        if self.tree.in_degree(child) == 0:
+            self.tree.add_edge(parent, child)
+
+        # Finding all predecessors
+        toconnect = set()
+        predecessors = SortedCollection(
+            [parent, child], key=lambda r: -r.energy)
+        while predecessors:
+            r1 = predecessors.pop()
+            toconnect.add(r1)
+            for r2 in self.tree.predecessors_iter(r1):
+                predecessors.add(r2)
+
         #The new order
-        newbranch = sorted(set(chain(
-            self.genReplica2Root(parent), self.genReplica2Root(child))))
+        newbranch = sorted(toconnect)
 
         # Ensuring that each replica only has the single correct predecessor
         for r1, r2 in izip(newbranch[1:], newbranch[:-1]):
@@ -321,23 +398,27 @@ class ReplicaGraph(object):
             if not self.tree.has_edge(r1, r2):
                 self.tree.add_edge(r1, r2)
 
-    def connectReplicaPair(self, r1, r2, **attr):
-        assert r1 > r2
-        self.graph.add_edge(r1, r2, energy=r1.energy, Emin=r2.energy, **attr)
-        r1s = list(self.genReplica2Root(r1))
-        r2s = list(self.genReplica2Root(r2))
-        replicas = SortedCollection(r1s + r2s)
+        assert nx.has_path(self.tree, parent, child)
 
-    def genReplica2Root(self, replica):
+        if check and any(self.tree.in_degree(r) > 1 for r in self.tree.nodes()):
+            raise GraphError('ReplicaGraph.tree is no longer a tree')
+
+    def fixTree(self):
+        """
+        """
+        while not nx.is_forest(self.tree):
+            for run in self.runs():
+                self.connectTreeReplicas(run.parent, run.child, check=False)
+            for path in self.paths():
+                self.connectTreeReplicas(path.parent, path.child, check=False)
+
+    def treeBranch(self, replica):
         try:
             while True:
                 yield replica
                 replica, = self.tree.predecessors_iter(replica)
         except ValueError:
             pass
-
-    def findSamples(self, replica):
-        return list(self.genSamples(replica))
 
     def genSamples(self, replica):
         runs = self.genConnectedRuns(replica)
@@ -421,25 +502,78 @@ class ReplicaGraph(object):
                     stored=stored, configs=configs, stepsizes=stepsizes)
         return path
 
+    def connectingReplicas(self, source, target, runs=True, paths=False):
+        """
+        """
+        if paths:
+            key = 'path'
+        elif runs:
+            key = 'run'
+        else:
+            key = 'energy'
+
+        G = self.graph
+        cutoff = len(self.graph)
+        visited = [source]
+        stack = [iter(G[source])]
+        while stack:
+            children = stack[-1]
+            child = next(children, None)
+
+            while child is not None:
+                if G[visited[-1]][child].has_key(key):
+                    break
+                elif child == target: # if target is a minimum
+                    break
+                child = next(children, None)
+
+            if child is None:
+                stack.pop()
+                visited.pop()
+            elif len(visited) < cutoff:
+                if child == target:
+                    yield visited + [target]
+                elif child not in visited:
+                    visited.append(child)
+                    stack.append(iter(G[child]))
+            else:
+                if child == target or target in children:
+                    yield visited + [target]
+                stack.pop()
+                visited.pop()
+
+    genConnectingReplicas = connectingReplicas
+
+    def connectingRuns(self, source, target):
+        for replicas in self.connectingReplicas(source, target, runs=True):
+            yield self.replicastoRun(replicas)
+
+    genConnectingRuns = connectingRuns
+
     def replicastoRun(self, replicas):
         """
         """
-        edges = []
+        runs = []
         for u, v in izip(replicas[:-1], replicas[1:]):
             edge = self.graph.edge[u][v]
             if edge.has_key('run'):
-                edges.append(edge)
+                runs.append(edge['run'].split(u, v))
             else:
                 break
-        run = reduce(joinRuns, edges)
-        return run
+        return combineAllRuns(runs)
 
-    def getConnectedRuns(self, replica, Efilter=None):
+    def findConnectedRuns(self, replica, Estart=None):
+        """ returns an iterator of all the runs that are connected to
+        replica that finish after Estart, can return the same run more than
+        once
         """
-        """
-        return list(self.genConnectedRuns(replica, Efilter))
+        Estart = np.inf if Estart is None else Estart
+        replicas = list(self.treeBranch(replica))
+        return (edge['run'] for r1 in replicas
+            for r2, edge in self.graph[r1].iteritems()
+            if r2.energy <= Estart if edge.has_key('run'))
 
-    def genConnectedRuns(self, replica, Efilter=None):
+    def connectedRuns(self, replica, Efilter=None):
         """
         """
         for edge in self.graph.edge[replica].itervalues():
@@ -454,14 +588,35 @@ class ReplicaGraph(object):
                 elif len(Emax) > 1 and Emax[0] > Efilter >= Emax[-1]:
                     yield run
 
-    def genPreceedingReplicas(self, replica):
-        for r1 in self.tree.predecessors_iter(replica):
-            for r2 in self.genPreceedingReplicas(r1):
-                yield r2
-            yield r1
+    genConnectedRuns = connectedRuns
 
-    def genSucceedingReplicas(self, replica, runs=False, paths=False):
-        for r1 in self.tree.successors_iter(replica):
+    def preceedingReplicas(self, replica, runs=True, paths=False):
+        """
+        """
+        for r1 in self.graph.predecessors_iter(replica):
+            if paths:
+                if self.graph[r1][replica].has_key('path'):
+                    for r2 in self.preceedingReplicas(r1, paths=True):
+                        yield r2
+                    yield r1
+            elif runs:
+                if (self.graph[r1][replica].has_key('run') or
+                    isinstance(replica, Minimum)):
+                    for r2 in self.preceedingReplicas(r1, runs=True):
+                        yield r2
+                    yield r1
+            else:
+                for r2 in self.preceedingReplicas(r1, runs=False):
+                    yield r2
+                yield r1
+
+    genPreeceedingReplicas = preceedingReplicas
+
+    def succeedingReplicas(self, replica, runs=True, paths=False):
+        """
+        """
+        for r1 in self.graph.successors_iter(replica):
+
             if paths:
                 if not self.graph.edge[replica][r1].has_key('paths'):
                     continue
@@ -473,17 +628,82 @@ class ReplicaGraph(object):
             for r2 in self.genSucceedingReplicas(r1, runs=runs, paths=paths):
                 yield r2
 
-    def genConnectedReplicas(self, replica):
-        """
-        """
-        successors = [node for node in self.graph.successors(replica)
-                        if isinstance(node, Replica)]
-        for rep1 in successors:
-            for rep2 in self.genConnectedReplicas(rep1):
-                yield rep2
-            yield rep1
+    genSucceedingReplicas = succeedingReplicas
 
-    def genAllConnectedMinima(self, replica):
+    def predecessors_iter(self, replica, runs=True, paths=False):
+        """
+        """
+
+        if paths:
+            key = 'path'
+        elif runs:
+            key = 'run'
+        else:
+            key = 'energy'
+
+        for parent in self.graph.predecessors_iter(replica):
+            if self.graph[parent][replica].has_key('energy'):
+                yield parent
+
+    def successors_iter(self, replica, runs=True, paths=False):
+        """ Returns an iterator of successor replicas connected by runs,
+        paths or both. Will return minima connected by paths if runs is True.
+        """
+        edges = self.graph[replica].iteritems()
+        if paths:
+            successors = (
+                child for child, edge in edges if edge.has_key('path'))
+        elif runs:
+            # Checks whether the children and their children
+            # are connected by runs or the child is a minimum
+            successors = (
+                c1 for c1, edge1 in edges
+                if isinstance(c1, Minimum) or (edge1.has_key('run') and  any(
+                    isinstance(c2, Minimum) or edge2.has_key('run')
+                    for c2, edge2 in self.graph[c1].iteritems())))
+        else:
+            successors = (child for child, edge in edges)
+        return successors
+
+    def successors(self, replica, runs=True, paths=False):
+        return list(self.successors_iter(replica, runs=runs, paths=paths))
+
+    def genConnectedMinima(self, replica, f=1., runs=True, paths=False):
+        """
+        """
+        successors = self.successors(replica, runs=runs, paths=paths)
+        if successors:
+            f /= len(successors)
+            for child in successors:
+                if isinstance(child, Minimum):
+                    yield (child, f)
+                else:
+                    for m, f in self.genConnectedMinima(
+                        child, f, runs=runs, paths=paths):
+                        yield m, f
+        else:
+            return
+
+    def genAllPreceedingReplicas(self, replica):
+        """ generates all the replicas that are higher in energy to the
+        replica given which are connected to the same minimum
+        """
+        try:
+            replica, = self.tree.predecessors_iter(replica)
+            yield replica
+        except ValueError:
+            pass
+
+    def genAllSucceedingReplicas(self, replica):
+        """ generates all the child replicas of the replica which
+        connect to the same minima as replica
+        """
+        for r1 in self.tree.successors_iter(replica):
+            yield r1
+            for r2 in self.genAllSucceedingReplicas(r1):
+                yield r2
+
+    def allConnectedMinima(self, replica):
         """
         """
         for r in self.tree.successors_iter(replica):
@@ -493,29 +713,7 @@ class ReplicaGraph(object):
                 for m in self.genAllConnectedMinima(r):
                     yield m
 
-    def genConnectedMinima(self, replica, f=1., runs=True, paths=False):
-        """
-        """
-        edges = self.graph[replica].iteritems()
-        if paths:
-            edges = [(child, edge) for child, edge in edges
-                     if edge.has_key('path')]
-        elif runs:
-            edges = [(child, edge) for child, edge in edges
-                     if isinstance(child, Minimum) or edge.has_key('run')]
-        else:
-            edges = list(edges)
-
-        if edges:
-            f /= len(edges)
-            for child, attr in edges:
-                if isinstance(child, Minimum):
-                    yield (child, f)
-                for mf in self.genConnectedMinima(child, f,
-                                                  runs=runs, paths=paths):
-                    yield mf
-        else:
-            return
+    genAllConnectedMinima = allConnectedMinima
 
     def removeReplica(self, replica):
         parent, = self.graph.predecessors(replica)
@@ -544,14 +742,49 @@ class ReplicaGraph(object):
         replicasets = self.connectReplicas(replicas)
         cdfs = []
         for reps, mset in replicasets:
-            cdf = reduce(lambda x,y: x+y, map(self.getMinimaCDF, reps))
+            cdf = reduce(
+                lambda x,y: x+y, map(self.getMinimaCDF, reps), CDF([]))
             cdfs.append(cdf)
         return replicasets, cdfs
 
+    def genMinBasins(self, replica):
+        """ generates the minima of the basins of attraction
+        sampled below replica, the length of the iterator is
+        the number of samples taken
+        """
+        edges = self.graph.edge[replica].iteritems()
+        #Samples of the basin of replica will be connected by
+        # runs of length 1
+        samples = (
+            r1 for r1, edge in edges
+            if edge.has_key('run') and edge['run'].Emax.size==1)
+        # These samples need to have paths
+        samples = (
+            r1 for r1 in samples if any(
+                edge.has_key('quench')
+                for edge in self.graph.edge[r1].itervalues()))
+        minima = (
+            [m for m, f in self.genConnectedMinima(r, runs=False, paths=True)]
+            for r in samples)
+        minima = (ms for ms in minima if ms)
+        return minima
+
+    def getMinBasinCDF(self, replica):
+        """ Calculates the CDF of the energies of the basins
+        of attraction in the local region of replica
+        """
+        cdfs = (CDF([m.energy for m in ms], n=1)
+                for ms in self.genMinBasins(replica))
+        # Calculating the CDF
+        return reduce(lambda x, y: x+y, cdfs, CDF([]))
+
     def getMinimaCDF(self, replica):
-        return CDF(*zip(*( (m.energy, f)
-                            for m,f in self.genConnectedMinima(replica))
-                        ), n=self.graph.out_degree(replica))
+        """
+        """
+        return CDF(*izip(*(
+            (m.energy, f)
+            for m,f in self.genConnectedMinima(replica, runs=True))
+            ), n=len_iter(self.successors_iter(replica, runs=True)))
 
     def compareMinimaDistributions(self, replicas):
         cdfs = map(self.getMinimaCDF, replicas)
@@ -642,9 +875,27 @@ class ReplicaGraph(object):
             else:
                 replica = parent
 
-        assert nx.is_branching(self.tree)
+        #assert nx.is_branching(self.tree)
+        assert not any(self.tree.in_degree(r) > 1 for r in self.tree.nodes())
 
         return newrep
+
+    def splitReplicas(self, replicas, Ecut, sort=True):
+        """
+        """
+        if sort:
+            replicas.sort(reverse=True)
+        assert replicas[0].energy >= Ecut > replicas[-1].energy
+
+        parent = replicas[0]
+        for child in replicas[1:]:
+            if child.energy < Ecut:
+                break
+            else:
+                assert child < parent
+                parent = child
+
+        return self.splitReplicaPair(parent, child, Ecut)
 
     def calcConnectivityGraph(self, Emax=None):
         """
@@ -714,8 +965,10 @@ class ReplicaGraph(object):
         dg.plot(**kwargs)
         return dg
 
-    def draw(self, tree=True,
-             energies=True, maxE=0., arrows=False, node_size=5, **kwargs):
+    def draw(self, tree=True, energies=True,
+             maxE=0., arrows=False, node_size=5, **kwargs):
+        """
+        """
         if tree:
             pos = nx.nx_agraph.graphviz_layout(self.tree, prog='dot')
             if energies:
@@ -755,7 +1008,7 @@ class ReplicaGraph(object):
 
     # TODO MARKING END OF WORKING CODE
 
-
+if 0:
 
     def getCombinedRun(self, replica, run=None):
         """
@@ -853,23 +1106,6 @@ class ReplicaGraph(object):
             attr = dict(energy=r1.energy,Emin=r2.energy)
             if run is not None: attr['run'] = run
             self.graph.add_edge(r1, r2, **attr)
-
-    @property
-    def Esplits(self):
-        prop = self.database.get_property("Esplits")
-        if prop is None:
-            return np.array([])
-        else:
-            return prop.value
-
-    @Esplits.setter
-    def Esplits(self, Esplits):
-        prop = self.database.get_property('Esplits')
-        if prop is not None:
-            prop.value = Esplits
-            self.database.session.commit()
-        else:
-            self.database.add_property('Esplits', Esplits)
 
 
     def addIntermediateReplicas(self, run, parent, child):

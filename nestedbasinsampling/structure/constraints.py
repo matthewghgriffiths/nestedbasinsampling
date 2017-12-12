@@ -5,6 +5,12 @@ from numpy.linalg import norm
 
 from pele.potentials import BasePotential
 
+try:
+    from nestedbasinsampling.structure.fortran import hardshell
+    fortran = True
+except:
+    fortran = False
+
 class BaseConstraint(BasePotential):
 
     def __call__(self, coords):
@@ -66,7 +72,7 @@ class CombinedPotConstraint(BasePotential):
         return E+self.factor*Econ, G+self.factor*Gcon
 
 
-class HardShellConstraint(BaseConstraint):
+class py_HardShellConstraint(BaseConstraint):
 
     def __init__(self, radius, ndim=3):
         self.radius = radius
@@ -98,27 +104,24 @@ class HardShellConstraint(BaseConstraint):
 
         return rout.sum(), gradient.reshape(coords.shape)
 
-class HardShellConstraint2(BaseConstraint):
-
-    def __init__(self, radius, ndim=3):
-        self.radius = radius
-        self.ndim = ndim
+class f90_HardShellConstraint(BaseConstraint):
+    def __init__(self, radius):
+        self.r = radius
 
     def getEnergy(self, coords):
-        pos = np.array(coords).reshape((-1,self.ndim))
-        dr = norm(pos, axis=1) - self.radius
-        return dr[dr>0.].sum()
+        return hardshell.hardshellenergy(coords.ravel(), self.r)
+
+    def getEnergyGradient(self, coords):
+        e, grad = hardshell.hardshellenergy_gradient(coords.ravel(), self.r)
+        return e, grad.reshape(coords.shape)
 
     def getGradient(self, coords):
-        pos = np.array(coords).reshape((-1,self.ndim))
-        dr = norm(pos, axis=1)
-        outside = (dr - self.radius)>0.
+        return self.getEnergyGradient(coords)[1]
 
-        gradient = np.zeros_like(pos)
-        gradient[outside] = pos[outside]/dr[outside,None]
-
-        return gradient.reshape(coords.shape)
-
+if fortran:
+    HardShellConstraint = f90_HardShellConstraint
+else:
+    HardShellConstraint = py_HardShellConstraint
 
 if __name__ == "__main__":
     coords = np.random.normal(0,0.3,(15,3))
@@ -129,7 +132,7 @@ if __name__ == "__main__":
 
     constraint = HardShellConstraint(1.)
 
-    print constraint.getEnergy(coords + p)
+    print py_HardShellConstraint(1.).getEnergy(coords + p), constraint.getEnergy(coords + p)
     if not constraint(coords + p):
         G = constraint.getGradient(coords + p)
         n = norm(G)

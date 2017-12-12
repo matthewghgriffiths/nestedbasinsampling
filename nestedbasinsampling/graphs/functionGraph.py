@@ -7,7 +7,7 @@ from scipy.integrate import quad
 import networkx as nx
 
 from nestedbasinsampling.storage import Run
-from nestedbasinsampling.integration import calcRunAverageValue
+from nestedbasinsampling.nestedsampling import calcRunAverageValue
 from nestedbasinsampling.utils import dict_update_copy
 
 class NumericIntegrator(object):

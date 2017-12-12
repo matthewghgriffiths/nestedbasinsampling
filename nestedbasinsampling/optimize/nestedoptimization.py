@@ -48,8 +48,8 @@ class NestedOptimizer(object):
 
     def __init__(self, X, pot, sampler,
                  tol=1e-1, alternate_stop_criterion=None, stepsize=None,
-                 events=None, iprint=-1, maxsteps=10000, debug=False,
-                 nsteps=None, nadapt=None,
+                 events=None, iprint=-1, nsteps=10000, debug=False,
+                 MC_steps=None, nadapt=None, target=None, use_quench=True,
                  energy=None, gradient=None, store_configs=False,
                  quench=lbfgs_cpp, quenchtol=1e-6, quench_kw={}):
 
@@ -65,10 +65,11 @@ class NestedOptimizer(object):
         # a list of events to run during the optimization
         self.events = [] if events is None else events
         self.iprint = iprint
-        self.maxsteps = maxsteps
-        self.nadapt = nadapt
         self.nsteps = nsteps
+        self.nadapt = nadapt
+        self.MC_steps = MC_steps
         self.tol = tol
+        self.target = target
 
         self.store_configs = True
 
@@ -77,14 +78,14 @@ class NestedOptimizer(object):
 
         if energy is None and gradient is None:
             self.E, self.G = self.pot.getEnergyGradient(self.X)
-        elif energy is not None:
+        elif gradient is None:
             self.E = energy
             self.G = self.pot.getGradient(self.X)
         else:
             self.E = energy
             self.G = gradient
 
-        self.rms = np.linalg.norm(self.G) / np.sqrt(self.G.size)
+        self.rms = np.inf
 
         self.iter_number = 0
         self.nopt = 0
@@ -96,7 +97,9 @@ class NestedOptimizer(object):
         self.result.message = []
 
         self.Emax = []
+        self.stepsizes = []
 
+        self.use_quench = use_quench
         self.quench = quench
         self.quenchtol = quenchtol
         self.quenchkw = quench_kw
@@ -105,7 +108,7 @@ class NestedOptimizer(object):
 
     def one_iteration(self):
         try:
-            res = self.sampler(self.E, self.X, nsteps=self.nsteps,
+            res = self.sampler(self.E, self.X, nsteps=self.MC_steps,
                                nadapt=self.nadapt, stepsize=self.stepsize)
 
             assert res.energy < self.E
@@ -125,6 +128,8 @@ class NestedOptimizer(object):
             self.rms = np.linalg.norm(self.G)/np.sqrt(self.X.size)
 
             self.Emax.append(res.energy)
+            self.stepsizes.append(res.stepsize)
+
             self.printState(False)
 
             for event in self.events:
@@ -154,15 +159,19 @@ class NestedOptimizer(object):
 
     def stop_criterion(self):
         """test the stop criterion"""
+
         if self.alternate_stop_criterion is None:
-            return self.rms < self.tol
+            if self.target is not None:
+                return (self.E < self.target) or (self.rms < self.tol)
+            else:
+                return self.rms < self.tol
         else:
             return self.alternate_stop_criterion(energy=self.E,
                                                  gradient=self.G,
                                                  tol=self.tol, coords=self.X)
 
     def run(self):
-        while self.iter_number < self.maxsteps and not self.stop_criterion():
+        while self.iter_number < self.nsteps and not self.stop_criterion():
             try:
                 self.one_iteration()
             except NestedSamplingError:
@@ -172,16 +181,19 @@ class NestedOptimizer(object):
         if self.iprint > 0:
             print self.sqstr.format(self.E, self.iter_number)
 
-        quenchres = self.quench_config()
-
-        if self.iprint > 0:
-            print self.qstr.format(quenchres.energy,quenchres.nsteps,quenchres.rms)
-
-        self.X = quenchres.coords
-        self.G = quenchres.grad
-        self.rms = quenchres.rms
         self.nopt = self.iter_number
-        self.iter_number += quenchres.nsteps
+        if self.use_quench:
+            quenchres = self.quench_config()
+
+            if self.iprint > 0:
+                print self.qstr.format(
+                    quenchres.energy,quenchres.nsteps,quenchres.rms)
+
+            self.X = quenchres.coords
+            self.E = quenchres.energy
+            self.G = quenchres.grad
+            self.rms = quenchres.rms
+            self.iter_number += quenchres.nsteps
 
         return self.get_result()
 
@@ -199,6 +211,7 @@ class NestedOptimizer(object):
         res.rms = self.rms
         res.grad = self.G
         res.Emax = np.array(self.Emax)
+        res.stepsize = np.array(self.stepsizes)
         res.nsteps = self.nopt
         res.success = self.stop_criterion()
         return res

@@ -15,7 +15,6 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.schema import Index
 
 from nestedbasinsampling.utils import Signal
-from nestedbasinsampling.integration import calcRunWeights, calcRunAverageValue
 
 __all__ = ["Minimum", "Replica", "Run", "TransitionState", "Database"]
 
@@ -78,6 +77,8 @@ class Minimum(Base):
     """point group order"""
     invalid = Column(Integer)
     """flag indicating if the minimum is invalid"""
+    _hash = Column(Integer)
+    """store hash for quick comparison"""
     user_data = deferred(Column(PickleType))
     """this can be used to store information about the minimum"""
 
@@ -85,6 +86,7 @@ class Minimum(Base):
         self.energy = energy
         self.coords = np.copy(coords)
         self.invalid = False
+        self._hash = hash(self.energy + self.coords.sum())
 
     def id(self):
         """return the sql id of the object"""
@@ -92,8 +94,9 @@ class Minimum(Base):
 
     def __eq__(self, m):
         """m can be integer or Minima object"""
-        assert self.id() is not None
-        if isinstance(m, type(self)):
+        if self.id() is None:
+            return hash(self) == hash(m)
+        elif isinstance(m, type(self)):
             assert m.id() is not None
             return self.id() == m.id()
         elif hasattr(m, 'id'):
@@ -108,7 +111,7 @@ class Minimum(Base):
         #_id = self.id()
         #assert id is not None
         #_id = self.energy ## needed to differentiate from Replica
-        return hash(self.energy + self.coords.sum())
+        return self._hash
 
     def __deepcopy__(self, memo):
         return self.__class__(self.energy, self.coords)
@@ -160,6 +163,8 @@ class Replica(Base):
     '''coordinates of the minimum'''
     invalid = Column(Integer)
     """flag indicating if the replica is invalid"""
+    _hash = Column(Integer)
+    """store hash for quick comparison"""
     user_data = deferred(Column(PickleType))
     """this can be used to store information about the replica"""
 
@@ -167,6 +172,9 @@ class Replica(Base):
         self.energy = energy
         self.coords = np.copy(coords) if coords is not None else coords
         self.stepsize = stepsize
+
+        csum = 0. if self.coords is None else self.coords.sum()
+        self._hash = hash(self.energy + csum)
 
         self.invalid = False
 
@@ -176,9 +184,9 @@ class Replica(Base):
 
     def __eq__(self, replica):
         """m can be integer or Replica object"""
-        assert self.id() is not None
-        #if isinstance(replica, Replica):
-        if isinstance(replica, type(self)):
+        if self.id() is None:
+            return hash(self) == hash(replica)
+        elif isinstance(replica, type(self)):
             assert replica.id() is not None
             return self.id() == replica.id()
         elif hasattr(replica, 'id'):
@@ -190,12 +198,7 @@ class Replica(Base):
         return self.energy > rep.energy
 
     def __hash__(self):
-        #_id = self.id()
-        #assert id is not None
-        #return _id
-        ## needed to differentiate from Minimum
-        csum = 0. if self.coords is None else self.coords.sum()
-        return hash(self.energy + csum)
+        return self._hash
 
     def __deepcopy__(self, memo):
         return self.__class__(self.energy, self.coords, stepsize=self.stepsize)
@@ -254,13 +257,27 @@ class Run(Base):
                             primaryjoin="Replica._id==Run._parent_id")
     '''The replica associated with the start of the nested sampling run'''
 
-    _child_id = Column(Integer, ForeignKey('tbl_replicas._id'))
-    child = relationship("Replica",
-                            primaryjoin="Replica._id==Run._child_id")
+
+    _childReplica_id = Column(Integer, ForeignKey('tbl_replicas._id'))
+    childReplica = relationship("Replica",
+                            primaryjoin="Replica._id==Run._childReplica_id")
+    """The replica associated with the end of the path"""
+
+    _childMinimum_id = Column(Integer, ForeignKey('tbl_minima._id'))
+    childMinimum = relationship("Minimum",
+                            primaryjoin="Minimum._id==Run._childMinimum_id")
+    """The minimum associated with the end of the path"""
+
+    #_child_id = Column(Integer, ForeignKey('tbl_replicas._id'))
+    #child = relationship("Replica",
+    #                        primaryjoin="Replica._id==Run._child_id")
     '''The replica associated with the end of the nested sampling run'''
 
     invalid = Column(Integer)
     """flag indicating if the run is invalid"""
+
+    _hash = Column(Integer)
+    """store hash for quick comparison"""
 
     user_data = deferred(Column(PickleType))
     """this can be used to store information about the nested sampling run"""
@@ -291,7 +308,27 @@ class Run(Base):
         else:
             self.stored = np.array([], dtype=int)
 
+        self._hash = hash(self.Emax.sum())
+
         self.invalid = False
+
+    @property
+    def child(self):
+        if self.childMinimum is not None:
+            return self.childMinimum
+        else:
+            return self.childReplica
+
+    @child.setter
+    def child(self, child):
+        if isinstance(child, Minimum):
+            self._childMinimum_id = child.id()
+            self.childMinimum = child
+        elif isinstance(child, Replica):
+            self._childReplica_id = child.id()
+            self.childReplica = child
+
+        self.childE = child.energy
 
     def id(self):
         """return the sql id of the object"""
@@ -307,7 +344,7 @@ class Run(Base):
             return self.id() == run
 
     def __hash__(self):
-        return hash(self.Emax.sum())
+        return self._hash
 
     def calcWeights(self):
         """
@@ -320,6 +357,69 @@ class Run(Base):
         weights = self.calcWeights() if weights is None else weights
         return calcRunAverageValue(weights, func, std=True)
 
+    @property
+    def log_frac(self):
+        return (np.log(self.nlive) - np.log(self.nlive + 1)).cumsum()
+
+    @property
+    def log_frac2(self):
+        return (np.log(self.nlive) - np.log(self.nlive + 2)).cumsum()
+
+    def frac_index(self, frac, log=False):
+        """
+        """
+        logfrac = frac if log else np.log(frac)
+        logX = self.log_frac
+        return (logX.size - 1) - logX[::-1].searchsorted(logfrac, side='left')
+
+    def frac_energy(self, frac, log=False):
+        return self.Emax[self.frac_index(frac, log=log)]
+
+    def split(self, r1=None, r2=None):
+        """ Splits the run to go between replica r1 and r2
+        if r1 or r2 is None then does not split run at that point
+        """
+        configs = self.configs
+        nlive = self.nlive
+        stepsizes = self.stepsizes
+        Emax = self.Emax
+        stored = self.stored
+        volume = self.volume
+
+        if not isinstance(r1, Replica):
+            if r1 is not None:
+                r1 = Replica(r1, None)
+            else:
+                r1 = self.parent
+
+        if not isinstance(r2, Replica):
+            if r2 is not None:
+                r2 = Replica(r2, None)
+            else:
+                r2 = self.child
+
+        Estart = r1.energy
+        Efinish = r2.energy
+
+        istart = Emax.size - Emax[::-1].searchsorted(
+            Estart, side='left')
+        iend = Emax.size - Emax[::-1].searchsorted(
+            Efinish, side='left')
+
+        jstart, jend = stored.searchsorted([istart, iend], side='left')
+
+        newEmax = Emax[istart:iend]
+        newnlive = nlive[istart:iend]
+        newStored, newStepsizes, newConfigs = None, None, None
+        if stored.size:
+            newStored = stored[jstart:jend] - istart
+            if stepsizes.size:
+                newStepsizes = stepsizes[jstart:jend]
+            if configs.size:
+                newConfigs = configs[jstart:jend]
+
+        return type(self)(newEmax, newnlive, r1, r2, volume=volume,
+            stored=newStored, configs=newConfigs, stepsizes=newStepsizes)
 
 class Path(Base):
     """
@@ -379,27 +479,24 @@ class Path(Base):
                             primaryjoin="Minimum._id==Path._childMinimum_id")
     """The minimum associated with the end of the path"""
 
+    quench = Column(Integer)
+    minimum = Column(Integer)
+    ascent = Column(Integer)
+
     invalid = Column(Integer)
     """flag indicating if the path is invalid"""
+    _hash = Column(Integer)
+    """store hash for quick comparison"""
     user_data = deferred(Column(PickleType))
     """this can be used to store information about the nested sampling run"""
 
-    def __init__(self, energy, parent, child,
-                 energies=None, stored=None, configs=None, **user_data):
+    def __init__(self, energy, parent, child, energies=None, stored=None,
+                 configs=None, quench=False, minimum=False,
+                 **user_data):
 
         self.energy = np.array(energy)
-
         self.parent = parent
-
         self.child = child
-#        if type(child) is Minimum:
-#            self._childMinimum_id = child.id()
-#            self.childMinimum = child
-#        elif type(child) is Replica:
-#            self._childReplica_id = child.id()
-#            self.childReplica = child
-#
-#        self.childE = child.energy
 
         self.energies = np.array([]) if energies is None else np.array(energies)
         self.configs  = np.array([]) if configs is None else np.array(configs)
@@ -414,6 +511,10 @@ class Path(Base):
         if user_data:
             self.user_data = user_data
 
+        self.quench = quench
+        self.minimum = minimum
+
+        self._hash = hash(self.child) ^ hash(self.parent)
         self.invalid = False
 
     @property
@@ -425,10 +526,10 @@ class Path(Base):
 
     @child.setter
     def child(self, child):
-        if type(child) is Minimum:
+        if isinstance(child, Minimum):
             self._childMinimum_id = child.id()
             self.childMinimum = child
-        elif type(child) is Replica:
+        elif isinstance(child, Replica):
             self._childReplica_id = child.id()
             self.childReplica = child
 
@@ -448,7 +549,7 @@ class Path(Base):
             return self.id() == m
 
     def __hash__(self):
-        return hash(self.child) ^ hash(self.parent)
+        return self._hash
 
 
 class TransitionState(Base):
@@ -881,14 +982,14 @@ class Database(object):
     def paths(self):
         return self.session.query(Path).all()
 
-    def addPath(self, energy, parent, child,
+    def addPath(self, energy, parent, child, quench=False, minimum=False,
                 energies=None, stored=None, configs=None, commit=True):
 
         self.lock.acquire()
 
         configs = None if configs is None else np.asanyarray(configs)
-        new = Path(energy, parent, child,
-                   stored=None, energies=energies, configs=configs)
+        new = Path(energy, parent, child, quench=quench, minimum=minimum,
+                   stored=stored, energies=energies, configs=configs)
 
         self.session.add(new)
         if commit:
@@ -921,14 +1022,13 @@ class Database(object):
 
         self.lock.acquire()
 
-        run = self.get_run(runid)
+        path = self.get_path(pathid)
 
-        run.energy = np.asanyarray(Emax)
-        run.Nlive = np.asanyarray(Nlive)
-        run.parent = parent
-        run.child = child
-        run.volume = volume
-        run.configs = None if configs is None else np.asanyarray(configs)
+        path.energy = energy
+        path.parent = parent
+        path.child = child
+        path.energies = energies
+        path.configs = None if configs is None else np.asanyarray(configs)
 
         if commit:
             self.session.commit()
@@ -1520,6 +1620,8 @@ def test_fast_insert(): # pragma: no cover
     print ts.id()
 
 
+from ..nestedsampling.integration import (
+    calcRunWeights, calcRunAverageValue)
 
 if __name__ == "__main__":
 

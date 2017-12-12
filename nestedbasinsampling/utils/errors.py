@@ -15,7 +15,7 @@ class NestedSamplingError(Exception):
 
     def __str__(self):
         return repr(self)
-        
+
 class SamplingError(Exception):
     """
     """
@@ -25,3 +25,19 @@ class SamplingError(Exception):
 
     def __str__(self):
         return str(self.args) + "\n" + str(self.kwargs)
+
+class GraphError(Exception):
+    """
+    """
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def __str__(self):
+        if self.kwargs.keys():
+            m = max(map(len, self.kwargs.keys())) + 1
+            kwstr = "\n" + '\n'.join([k.rjust(m) + ': ' + repr(v)
+                                      for k, v in self.kwargs.iteritems()])
+        else:
+            kwstr = ''
+        return '\n'.join(str(v) for v in self.args) + kwstr
