@@ -110,7 +110,7 @@ class NestedBasinOptimizer(object):
                         break
                     else:
                         try:
-                            coords = sampler.fixConstraint(coords)
+                            coords = self.sampler.fixConstraint(coords)
                             break
                         except NotImplementedError:
                             pass

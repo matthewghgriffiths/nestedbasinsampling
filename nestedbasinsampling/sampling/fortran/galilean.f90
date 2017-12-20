@@ -314,21 +314,22 @@ do while(niter.lt.nsteps)
             return
         end if
 
-        ! Adding some noise to the vector
-        if (theta.gt.0.d0) then
-            call genp(newcoords, stepsize, noise, n)
-            !noise(:) = random_unitvec(n) * stepsize
-
-            p(:) = cos(theta) * p(:) + sin(theta)*noise(:)
-            d2 = 0.d0
-            do j=1,n
-                d2 = d2 + p(j)**2
-            end do
-            p(:) = p(:)*stepsize/sqrt(d2)
-        else
-            call genp(newcoords, stepsize, p, n)
-        endif
+        
     end if
+    ! Adding some noise to the vector
+    if (theta.gt.0.d0) then
+        call genp(newcoords, stepsize, noise, n)
+        !noise(:) = random_unitvec(n) * stepsize
+
+        p(:) = cos(theta) * p(:) + sin(theta)*noise(:)
+        d2 = 0.d0
+        do j=1,n
+            d2 = d2 + p(j)**2
+        end do
+        p(:) = p(:)*stepsize/sqrt(d2)
+    else
+        call genp(newcoords, stepsize, p, n)
+    endif
 end do
 
 info = 1

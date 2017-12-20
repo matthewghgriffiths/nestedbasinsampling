@@ -474,19 +474,18 @@ class py_GalileanSampler(BaseSampler):
                     niter += 1
                     nreject += 1
 
+            if self.theta > 0.:
+                noise = self.gen_p(newcoords, stepsize)
+                p[:] = np.cos(self.theta)*p + np.sin(self.theta)*noise
+                p *= stepsize/np.linalg.norm(p)
+            else:
+                p = self.gen_p(newcoords, stepsize)
 
-                if self.theta > 0.:
-                    noise = self.gen_p(newcoords, stepsize)
-                    p[:] = np.cos(self.theta)*p + np.sin(self.theta)*noise
-                    p *= stepsize/np.linalg.norm(p)
-                else:
-                    p = self.gen_p(newcoords, stepsize)
-
-                if nreject > self.maxreject:
-                    raise SamplingError(
-                        'HMC  > failed to find point',
-                        stepsize=stepsize, Ecut=Ecut, niter=niter,
-                        naccept=naccept, nreflect=nreflect, nreject=nreject)
+            if nreject > self.maxreject:
+                raise SamplingError(
+                    'HMC  > failed to find point',
+                    stepsize=stepsize, Ecut=Ecut, niter=niter,
+                    naccept=naccept, nreflect=nreflect, nreject=nreject)
 
         res = Result(
             energy=Enew, coords=newcoords, stepsize=stepsize, grad=Gnew,
