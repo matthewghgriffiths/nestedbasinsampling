@@ -7,6 +7,7 @@ import numpy as np
 from pele.optimize import lbfgs_cpp
 
 from nestedbasinsampling.sampling import SamplingError
+from nestedbasinsampling.sampling.takestep import vector_random_uniform_hypersphere
 from nestedbasinsampling.utils import (
     Result, NestedSamplingError, dict_update_keep, SortedCollection)
 
@@ -18,9 +19,8 @@ class NestedBasinOptimizer(object):
     def __init__(self, minimum, pot, sampler, nlive=1, energy=np.inf,
                  tol=1e-1, alternate_stop_criterion=None, stepsize=None,
                  events=None, iprint=-1, nsteps=10000, debug=False,
-                 MC_steps=None, nadapt=None, target=None, use_quench=True,
-                 store_configs=False,
-                 quench=lbfgs_cpp, quenchtol=1e-6, quench_kw={}):
+                 MC_steps=None, nadapt=None, target=None, store_configs=False,
+                 harmonic_start=True, harmonic_tries=20, harmonic_factor=2.):
 
         self.minimum = minimum
         self.energy = self.minimum.energy
@@ -31,7 +31,6 @@ class NestedBasinOptimizer(object):
 
         self.set_coords()
 
-        # a list of events to run during the optimization
         self.events = [] if events is None else events
         self.iprint = iprint
         self.nsteps = nsteps
@@ -40,7 +39,15 @@ class NestedBasinOptimizer(object):
         self.tol = tol
         self.target = target
 
+        self.harmonic_start = harmonic_start
+        self.harmonic_tries = harmonic_tries
+        self.harmonic_factor = harmonic_factor
+
+        if self.harmonic_start:
+            self.set_harmonic()
+
         self.store_configs = store_configs
+
 
         self.alternate_stop_criterion = alternate_stop_criterion
         self.debug = debug  # print debug messages
@@ -66,6 +73,23 @@ class NestedBasinOptimizer(object):
         self.logF = 0.
         self.live_points = SortedCollection([], key=lambda res: res.energy)
 
+    def set_harmonic(self):
+        self.H = self.pot.getHessian(self.minimum.coords)
+        self.u, self.v = np.linalg.eigh(self.H)
+        p = self.u > 1e-5
+        self.k = p.sum()
+
+        self.up = self.u[p]
+        self.vp = self.v[:,p]
+        self.up2 = (self.up/2.)**-0.5
+        self.Ef = self.harmonic_factor**(1./self.k)
+
+    def random_harmonic_coords(self, E):
+        fac = self.Ef * (E-self.minimum.energy)**0.5
+        x = vector_random_uniform_hypersphere(self.k) * fac
+        newcoords = self.vp.dot(self.up2 * x) + self.minimum.coords
+        Enew = self.pot.getEnergy(newcoords)
+        return Enew, newcoords
 
     def set_coords(self):
         self.coords = self.minimum.coords
@@ -74,9 +98,30 @@ class NestedBasinOptimizer(object):
 
     def initialize(self):
         while len(self.live_points) < self.nlive:
-            res = self.sampler(self.E, self.coords, nsteps=self.MC_steps,
-                               nadapt=self.nadapt, stepsize=self.stepsize)
+            res = self.sample_point()
             self.live_points.insert(res)
+
+    def sample_point(self):
+        if self.harmonic_start:
+            for i in xrange(self.harmonic_tries):
+                E, coords = self.random_harmonic_coords(self.E)
+                if E < self.E:
+                    if self.sampler.constraint(coords):
+                        break
+                    else:
+                        try:
+                            coords = sampler.fixConstraint(coords)
+                            break
+                        except NotImplementedError:
+                            pass
+            else:
+                coords = self.coords
+        else:
+            coords = self.coords
+
+        res = self.sampler(self.E, coords, nsteps=self.MC_steps,
+                           nadapt=self.nadapt, stepsize=self.stepsize)
+        return res
 
     def one_iteration(self):
 
@@ -95,8 +140,8 @@ class NestedBasinOptimizer(object):
         if self.store_configs:
             self.configs.append(deadpoint.coords)
 
-        res = self.sampler(self.E, self.coords, nsteps=self.MC_steps,
-                           nadapt=self.nadapt, stepsize=self.stepsize)
+
+        res = self.sample_point()
 
         self.live_points.insert(res)
         self.printState(False)

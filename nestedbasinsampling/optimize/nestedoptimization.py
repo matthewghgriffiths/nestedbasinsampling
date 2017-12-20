@@ -142,14 +142,16 @@ class NestedOptimizer(object):
             if self.debug:
                 print "NOPT > Sampling error"
             self.result.message.append('Sampling Error')
-            quenchres = self.quench_config()
 
-            self.X = quenchres.coords
-            self.E = quenchres.energy
-            self.G = quenchres.grad
-            self.rms = quenchres.rms
-            self.nopt = self.iter_number
-            self.iter_number += quenchres.nsteps
+            if self.use_quench:
+                quenchres = self.quench_config()
+                self.X = quenchres.coords
+                self.E = quenchres.energy
+                self.G = quenchres.grad
+                self.rms = quenchres.rms
+                self.nopt = self.iter_number
+                self.iter_number += quenchres.nsteps
+
 
     def printState(self, force=True):
         cond = (self.iprint > 0 and self.iter_number%self.iprint == 0) or force

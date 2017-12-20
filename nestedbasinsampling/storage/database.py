@@ -365,6 +365,12 @@ class Run(Base):
     def log_frac2(self):
         return (np.log(self.nlive) - np.log(self.nlive + 2)).cumsum()
 
+    @property
+    def log_rel_error(self):
+        logX = self.log_frac
+        logX2 = self.log_frac2
+        return np.log1p(np.sqrt(np.exp(logX2 - 2 * logX) - 1))
+
     def frac_index(self, frac, log=False):
         """
         """

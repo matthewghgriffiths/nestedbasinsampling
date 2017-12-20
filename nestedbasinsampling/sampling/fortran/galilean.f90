@@ -102,7 +102,7 @@ function r_uniform() result(rand)
   return
 end
 
-function r_normal () result(rand)
+function r_normal ()
 
 !*****************************************************************************80
 !
@@ -137,17 +137,31 @@ function r_normal () result(rand)
 
   real ( kind = 8 ) r1
   real ( kind = 8 ) r2
-  real ( kind = 8 ) rand
+  real ( kind = 8 ) r_normal
   real ( kind = 8 ), parameter :: r8_pi = 3.141592653589793D+00
  ! real ( kind = 8 ) r8_uniform_01
  ! integer ( kind = 4 ) seed
-  real ( kind = 8 ) x
 
   r1 = r_uniform ()
   r2 = r_uniform ()
-  rand = sqrt ( - 2.0D+00 * log ( r1 ) ) * cos ( 2.0D+00 * r8_pi * r2 )
+  r_normal = sqrt ( - 2.0D+00 * log ( r1 ) ) * cos ( 2.0D+00 * r8_pi * r2 )
 
   return
+end
+
+function random_normal_vec(n)
+
+implicit none
+
+integer n
+double precision, dimension(n) :: random_normal_vec
+
+integer i
+
+do i=1,n
+    random_normal_vec(i) = r_normal()
+end do
+
 end
 
 function random_unitvec(n)
@@ -158,26 +172,27 @@ integer n
 double precision, dimension(n) :: random_unitvec
 
 integer i
-double precision rand, d2
+double precision d2
 
+random_unitvec(:) = random_normal_vec(n)
+
+d2 = 0.d0
 do i=1,n
-    rand = r_normal()
-    random_unitvec(i) = rand
-    d2 = d2 + rand**2
+    d2 = d2 + random_unitvec(i)**2
 end do
-
 random_unitvec(:) = random_unitvec(:)/sqrt(d2)
 
 end
 
-subroutine newpoint(ecut, coords, n, nsteps, maxreject, stepsize, &
+subroutine newpoint( &
+    & ecut, coords, n, nsteps, maxreject, stepsize, theta, &
     & pot, constraint, energy, grad, endcoords, &
-    & naccept, nreject, nreflect, niter, info)
+    & naccept, nreject, nreflect, niter, info, genp)
 
 implicit none
 
 integer, intent(in) :: n, nsteps, maxreject
-double precision, intent(in) :: ecut, stepsize, coords(n)
+double precision, intent(in) :: ecut, stepsize, theta, coords(n)
 double precision, intent(out) :: energy, grad(n), endcoords(n)
 integer, intent(out) :: naccept, nreject, nreflect, niter, info
 
@@ -191,13 +206,16 @@ external constraint
 !f2py intent(hide) :: n
 !f2py intent(out) :: econ
 !f2py intent(out), depend(n) :: gcon
+external genp
+!f2py intent(in), depend(n) :: testcoords
+!f2py intent(in) :: stepsize
+!f2py intent(hide) :: n
+!f2py intent(out), depend(n) :: p
 
-double precision gnew(n), gcon(n), p(n), newcoords(n), testcoords(n)
-double precision gn(n), gn1(n), gn2(n), d1, d2
-double precision econ, enew, eold
 
+double precision gnew(n), gcon(n), p(n), dp(n), newcoords(n), testcoords(n)
+double precision gn(n), d1, d2, econ, enew, eold, reflect(n), noise(n)
 integer j
-
 logical eaccept, caccept
 
 nreject = 0
@@ -219,12 +237,14 @@ if (.not.eaccept.or.(.not.caccept)) then
     return
 end if
 
-eold = enew
 newcoords(:) = coords
-p(:) = random_unitvec(n) * stepsize
+
+!p(:) = random_unitvec(n) * stepsize
+call genp(newcoords, stepsize, p, n)
 
 do while(niter.lt.nsteps)
 
+    eold = enew
     testcoords(:) = newcoords(:) + p(:)
 
     call pot(testcoords, enew, gnew, n)
@@ -234,11 +254,12 @@ do while(niter.lt.nsteps)
     eaccept = enew.le.ecut
 
     if (eaccept.and.caccept) then
+        eold = enew
         newcoords(:) = testcoords(:)
         naccept = naccept + 1
         niter = niter + 1
     else
-
+        ! Do reflection
         if (eaccept.and.(.not.caccept)) then
             d2 = 0.d0
             do j=1,n
@@ -265,9 +286,11 @@ do while(niter.lt.nsteps)
             end do
             gn(:) = gn(:)/sqrt(d2)
         end if
-        p(:) = p(:) - 2.d0 * gn(:) * dot_product(gn, p)
-        testcoords(:) = testcoords(:) + p(:)
 
+        dp(:) = 2.d0 * gn(:) * dot_product(gn(:), p)
+        p(:) = p(:) - dp(:)
+
+        testcoords(:) = testcoords(:) + p(:)
         call pot(testcoords, enew, gnew, n)
         call constraint(testcoords, econ, gcon, n)
 
@@ -275,10 +298,12 @@ do while(niter.lt.nsteps)
         eaccept = enew.le.ecut
 
         if (eaccept.and.caccept) then
+            eold = enew
             newcoords(:) = testcoords(:)
             niter = niter + 1
             nreflect = nreflect + 1
         else
+            p(:) = - (p(:) + dp(:))
             enew = eold
             niter = niter + 1
             nreject = nreject + 1
@@ -289,7 +314,20 @@ do while(niter.lt.nsteps)
             return
         end if
 
-        p(:) = random_unitvec(n) * stepsize
+        ! Adding some noise to the vector
+        if (theta.gt.0.d0) then
+            call genp(newcoords, stepsize, noise, n)
+            !noise(:) = random_unitvec(n) * stepsize
+
+            p(:) = cos(theta) * p(:) + sin(theta)*noise(:)
+            d2 = 0.d0
+            do j=1,n
+                d2 = d2 + p(j)**2
+            end do
+            p(:) = p(:)*stepsize/sqrt(d2)
+        else
+            call genp(newcoords, stepsize, p, n)
+        endif
     end if
 end do
 
