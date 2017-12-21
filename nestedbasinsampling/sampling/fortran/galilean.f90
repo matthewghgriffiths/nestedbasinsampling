@@ -214,7 +214,7 @@ external genp
 
 
 double precision gnew(n), gcon(n), p(n), dp(n), newcoords(n), testcoords(n)
-double precision gn(n), d1, d2, econ, enew, eold, reflect(n), noise(n)
+double precision gn(n), d1, d2, econ, enew, eold, gold(n), noise(n)
 integer j
 logical eaccept, caccept
 
@@ -245,6 +245,7 @@ call genp(newcoords, stepsize, p, n)
 do while(niter.lt.nsteps)
 
     eold = enew
+    gold(:) = gnew(:)
     testcoords(:) = newcoords(:) + p(:)
 
     call pot(testcoords, enew, gnew, n)
@@ -299,12 +300,14 @@ do while(niter.lt.nsteps)
 
         if (eaccept.and.caccept) then
             eold = enew
+            gold(:) = gnew(:)
             newcoords(:) = testcoords(:)
             niter = niter + 1
             nreflect = nreflect + 1
         else
             p(:) = - (p(:) + dp(:))
             enew = eold
+            gnew(:) = gold(:)
             niter = niter + 1
             nreject = nreject + 1
         end if
@@ -314,7 +317,7 @@ do while(niter.lt.nsteps)
             return
         end if
 
-        
+
     end if
     ! Adding some noise to the vector
     if (theta.gt.0.d0) then

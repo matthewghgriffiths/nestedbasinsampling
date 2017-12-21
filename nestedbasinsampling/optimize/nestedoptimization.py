@@ -94,6 +94,7 @@ class NestedOptimizer(object):
         self.accept = defaultdict(int)
         self.result = Result()
         self.result.initialcoords = self.Xi
+        self.result.initialenergy = self.E
         self.result.message = []
 
         self.Emax = []
