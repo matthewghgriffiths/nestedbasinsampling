@@ -45,7 +45,7 @@ def calc_thermodynamics(Es, log_vol, Ts, Emin=None, log_f=0., ntrap=5000):
 
     return logZ, logE1, logE2s, Emin
 
-def calcCv(lZ, lE1, lE2, Emin=0.):
+def calcCv(Ts, lZ, lE1, lE2, k, Emin=0.):
     U = np.exp(lE1 - lZ) + Emin
     U2 = np.exp(lE2 - lZ) + 2*Emin*U - Emin**2
     V = U - 0.5*k * Ts
@@ -156,6 +156,34 @@ def find_run_harmonic_energy(r, m, k, res=1000, sig=1e-6, minlive=100,fac=2./3):
     ix = 1 + int(chimin.searchsorted(sig)*l.size/res*fac)
     i = l.size - max(im, ix) - 1
     return r.Emax[i], i
+    
+def interpolate_log_volumes(old_Es, old_vol, old_vol2, 
+                            log_step=1., start_vol=0., start_vol2=0.):
+    """
+    """
+    # To get a smooth interpolation
+    # Probably can do this better...
+    Es = np.concatenate(old_Es)
+    log_vol = np.concatenate(old_vol)
+    Es[::-1].sort()
+    log_vol[::-1].sort()
+    log_space = np.arange(0., log_vol[-1], -log_step)
+    Ematch = Es[-log_vol[::-1].searchsorted(log_space)]
+
+    log_vols = np.array(
+        [np.interp(Ematch, _Es[::-1], _l[::-1], left=-np.inf) + start_vol
+         for _Es, _l in izip(old_Es, old_vol)])
+    log_vol2s = np.array(
+        [np.interp(Ematch, _Es[::-1], _l[::-1], left=-np.inf) + start_vol2
+         for _Es, _l in izip(old_Es, old_vol2)])
+
+    log_ratio = np.diff(np.c_[[0.]*len(log_vols), log_vols], axis=1)
+    log_ratio2 = np.diff(np.c_[[0.]*len(log_vols), log_vol2s], axis=1)
+
+    a_vol, b_vol = logmoment2Beta(log_vols , log_vol2s)
+    a_rat, b_rat = logmoment2Beta(log_ratio , log_ratio2)
+
+    return Ematch, a_vol, b_vol, a_rat, b_rat
 
 @total_ordering
 class SuperBasin(object):
@@ -204,7 +232,8 @@ class BasinGraph(object):
     """ This class joins replicas in the ReplicaClass together
     as a set of super basins.
     """
-    def __init__(self, replicaGraph, dof=None, max_energy=np.inf, debug=True):
+    def __init__(self, replicaGraph, merge_BF=-1.,
+                 dof=None, max_energy=np.inf, debug=True):
         """
         """
         self.repGraph = replicaGraph
@@ -212,7 +241,7 @@ class BasinGraph(object):
         self._connectgraph = nx.Graph()
         self._disconnectgraph = None
         self.debug=debug
-        self.initialize(max_energy)
+        #self._initialize(max_energy, merge_BF)
 
     def SuperBasin(self, energy, minima={}, log_vol=None, log_vol2=None):
         newbasin = SuperBasin(
@@ -220,8 +249,59 @@ class BasinGraph(object):
         self.graph.add_node(newbasin)
         self.basin[newbasin.minima] = newbasin
         return newbasin
+        
+    def minimum_run(self, m, 
+                     max_energy=np.inf, 
+                     merge_BF=None, log_step=1., pa=0.5, pb=0.5):
+        """
+        """
+        nrun = self.repGraph.nested_run(m).split(max_energy, None)
+        if merge_BF is not None:
+            try:
+                brun = self.repGraph.basin_run(m).split(max_energy, None)
+                
+                split = (min(nrun.Emax[0], brun.Emax[0]), 
+                         max(nrun.Emax[-1], brun.Emax[-1]))
+                nEs = nrun.Emax
+                nl = nrun.log_frac
+                nl2 = nrun.log_frac2
+                bEs = brun.Emax
+                bl = brun.log_frac
+                bl2 = brun.log_frac2
 
-    def initialize(self, max_energy=np.inf):
+                old_Es = [nEs, bEs]
+                old_vol = [nl, bl]
+                old_vol2 = [nl2, bl2]
+                Ematch, a_vol, b_vol, a_rat, b_rat = \
+                    interpolate_log_volumes(old_Es, old_vol, old_vol2, 
+                                            log_step=log_step)
+                not_nan = np.isnan(a_rat+b_rat).any(0) == False  
+                Ematch = Ematch[not_nan]
+                a_rat, b_rat = a_rat[:,not_nan], b_rat[:,not_nan]
+
+                #logBF_vol, comp = beta_log_bayes_factor(a_vol, b_vol, pa=pa, pb=pb)
+                logBF_rat, comp = beta_log_bayes_factor(a_rat, b_rat, pa=pa, pb=pb)
+                logBFc = np.minimum.accumulate(logBF_rat[:,::-1],1)[:,::-1]
+                maxBF = np.nanmax(logBFc, axis=0)
+                i_merge = maxBF.searchsorted(merge_BF)
+                Emerge = Ematch[i_merge]
+                
+                newrun = combineAllRuns([nrun, brun.split(Emerge, None)])
+                
+                if self.debug:
+                    print (
+                        "BasinGraph > merging basin run for minimum E ="+
+                        "{:10.5g} at energy = {:10.5g}").format(
+                            m.energy, Emerge)
+                
+            except ValueError:
+                newrun = nrun
+        else:
+            newrun = nrun
+            
+        return newrun
+        
+    def _initialize(self, max_energy=np.inf, merge_BF=-1.):
         """
         """
         self.graph = nx.DiGraph()
@@ -243,7 +323,8 @@ class BasinGraph(object):
         for m in self.repGraph.minima():
             newbasin = self.SuperBasin(m.energy, [m])
             self.basin[m] = newbasin
-            newrun = self.repGraph.nested_run(m).split(max_energy, None)
+            #newrun = self.repGraph.nested_run(m).split(max_energy, None)
+            newrun = self.minimum_run(m, max_energy=max_energy, merge_BF=merge_BF)
             self.graph.add_edge(gbasin, newbasin, run=newrun)
 
     @property
@@ -477,7 +558,14 @@ class BasinGraph(object):
             (b, run.Emax,
              run.log_frac, run.log_frac2)
             for b, run in connected_runs))
-
+            
+        Ematch, a_vol, b_vol, a_rat, b_rat = \
+            interpolate_log_volumes(
+                basin_Es, basin_vol, basin_vol2, log_step=log_step, 
+                start_vol=(basin.log_vol or 0.), 
+                start_vol2=(basin.log_vol2 or 0.))
+        
+        """
         # To get a smooth interpolation
         # Probably can do this better...
         Es = np.concatenate(basin_Es)
@@ -501,7 +589,8 @@ class BasinGraph(object):
 
         a_vol, b_vol = logmoment2Beta(log_vols , log_vol2s)
         a_rat, b_rat = logmoment2Beta(log_ratio , log_ratio2)
-
+        """
+        
         return Ematch, a_vol, b_vol, a_rat, b_rat, children
 
     def count_runs(self, basin):
@@ -554,9 +643,9 @@ class BasinGraph(object):
             maxBF = np.nanmax(logBFc, axis=0)
             i_merge = -maxBF[::-1].searchsorted(target_BF) - 1
             
-            if i_merge==-1:
+            if i_merge==-Ematch.size:
                 break
-            print i_merge, -_merge==-1
+            print i_merge, i_merge==-1, Ematch[0], Ematch[i_merge], Ematch.size
             
             Emerge = Ematch[i_merge]
             good = logBFc[:,i_merge]>target_BF
@@ -864,15 +953,25 @@ class BasinGraph(object):
         lZ = logsumexp(lZs, axis=0)
         lE1 = logsumexp(lE1s, axis=0)
         lE2 = logsumexp(lE2s, axis=0)
-        res = calcCv(lZ, lE1, lE2, self.Emin)
         
+        U = np.exp(lE1 - lZ) + self.Emin
+        U2 = np.exp(lE2 - lZ) + 2*self.Emin*U - self.Emin**2
+        V = U - 0.5*self.dof * Ts
+        V2 = U2 - U**2 + V**2
+        Cv = 0.5 * self.dof + (V2 - V ** 2) * Ts ** -2
+        
+        lZ -= self.Emin/Ts
+
+        CvReturn = namedtuple("CvReturn", "lZ U U2 Cv")
+        res = CvReturn(lZ=lZ, U=U, U2=U2, Cv=Cv)
         return res
         
     def disconnectivity_graph(self, Emax=None, **kwargs):
         """"""
         if Emax is None:
             Emax = max(
-                b.energy for b in self.basins() if np.isfinite(b.energy))
+                b.energy for b in self.basins() 
+                if b.energy is not None and np.isfinite(b.energy))
 
         minima = list(m for b in self.minbasins for m in b.minima)
         pairs = set((m1, m2) for i, m1 in enumerate(minima)
