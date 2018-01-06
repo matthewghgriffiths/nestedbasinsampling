@@ -364,6 +364,14 @@ class Run(Base):
     @property
     def log_frac2(self):
         return (np.log(self.nlive) - np.log(self.nlive + 2)).cumsum()
+     
+    @property
+    def log_frac_up(self):
+        return (np.log(self.nlive) - np.log(self.nlive - 1))[::-1].cumsum()[::-1]
+
+    @property
+    def log_frac2_up(self):
+        return (np.log(self.nlive) - np.log(self.nlive - 2))[::-1].cumsum()[::-1]
 
     @property
     def log_rel_error(self):

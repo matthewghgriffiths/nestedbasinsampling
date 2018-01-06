@@ -6,6 +6,18 @@ implicit none
 
 contains
 
+function logaddexp(x1, x2) result(res)
+
+implicit none
+
+double precision x1, x2
+double precision x_max, res
+
+x_max = max(x1, x2)
+res = log(exp(x1 - x_max) + exp(x2 - x_max)) + x_max
+
+end
+
 subroutine combineruns(emaxs, nlives, nruns, ndead, &
  &                     Estart, Efinish, emaxnew, nlivenew, ndeadnew, info)
 implicit none

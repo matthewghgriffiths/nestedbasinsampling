@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from itertools import izip
+from itertools import izip, izip_longest, repeat, chain
 import numpy as np
 
 try:
@@ -15,7 +15,7 @@ def findRunSplit(run, splitf=0.5):
     i = np.searchsorted(-logF, -logF[-1]*splitf)
     return run.Emax[i], i
 
-def py_combineAllRuns(runs, parent=None, child=None):
+def py_combineAllRuns_old(runs, parent=None, child=None):
     """ Combines all the runs passed into a single combined run, starting and
     finishing at the parent and child replica (if specified).
 
@@ -145,6 +145,38 @@ def py_combineAllRuns(runs, parent=None, child=None):
     newRun = Run(Emaxnew, nlivenew, parent, child,
                  stored=storednew, configs=configsnew, stepsizes=stepsizesnew)
     return newRun
+    
+def py_combineAllRuns(runs, parent=None, child=None):
+    """
+    """
+    if parent is None:
+        parent = max(
+            (run.parent for run in runs), key=lambda r: r.energy)
+    if child is None:
+        child = min(
+            (run.child for run in runs), key=lambda r: r.energy)
+            
+    _runs = [
+        r.split(parent.energy, child.energy)
+        if parent.energy < r.parent.energy else
+        r.split(None, child.energy)
+        for r in runs]
+    runEs = (np.r_[r.parent.energy, r.Emax] for r in _runs)
+    runnlive = (np.r_[0,r.nlive,0] for r in runs)
+    runndiff = (np.diff(ns) for ns in runnlive)
+    runvalues = chain(*(
+        izip(Es, chain([False], repeat(True)), diff)
+        for Es, diff in izip(runEs, runndiff)))
+        
+    combined = np.array(sorted(runvalues, reverse=True))
+    Es, flags, diffs = combined.T
+
+    nlive = np.cumsum(diffs)
+    keep = flags.nonzero()[0]
+    Esnew = Es[keep]
+    nlivenew = nlive[keep-1]
+    
+    return Run(Esnew, nlivenew, parent, child)
 
 def f90_combineAllRuns(runs, parent=None, child=None):
     """
@@ -204,7 +236,16 @@ def splitRun(run, startrep, endrep):
 
 
 if has_fortran:
-    combineAllRuns = f90_combineAllRuns
+    def combineAllRuns(runs, parent=None, child=None, nbatch=10):
+        mergeruns = runs
+        while len(mergeruns) > 1:
+            splitruns = (
+                (r for r in batch if r is not None) 
+                for batch in izip_longest(*[iter(mergeruns)]*nbatch))
+            mergeruns = [f90_combineAllRuns(batch, parent, child) 
+                         for batch in splitruns]
+        run, = mergeruns
+        return run
 else:
     combineAllRuns = py_combineAllRuns
 
