@@ -45,6 +45,11 @@ def vector_random_uniform_hypersphere(k):
     p = np.random.power(k)
     return p * u
 
+def random_step(coords, stepsize=1.0):
+    coords = np.asanyarray(coords)
+    p = vec_random_ndim(coords.size).reshape(coords.shape)*stepsize
+    return p
+
 def hypersphere_step(coords, stepsize=1.0):
     """
     Generates random direction vector

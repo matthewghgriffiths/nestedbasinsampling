@@ -107,3 +107,6 @@ ENV/
 
 # gedit
 *~
+
+#other
+*.pdf

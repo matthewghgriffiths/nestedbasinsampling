@@ -51,6 +51,7 @@ class BaseSampler(object):
         self.acc_ratio = acc_ratio
         self.r = r
         self.a, self.b = self._calcStepFactors(self.acc_ratio, r)
+        return self.a, self.b 
 
     def _calcStepFactors(self, acc_ratio, r):
         """
@@ -68,7 +69,18 @@ class BaseSampler(object):
             c = (a*acc_ratio + b)**r
             a = (a*acc_ratio + b)**(1./r) - c
             return np.r_[a, c]
-        a, b = fixed_point(iterStepFactor, np.r_[0.1,0.1], args=(acc_ratio,r))
+        test_point = np.array(
+            np.meshgrid(*(np.logspace(-2,0,5),)*2)).reshape(-1,2)
+        a, b = None, None
+        while a is None:
+            for p in test_point:
+                try:
+                    a, b = fixed_point(
+                        iterStepFactor, np.r_[0.1,0.1], args=(acc_ratio,r))
+                    break
+                except RuntimeError as e:
+                    pass
+        #a, b = fixed_point(iterStepFactor, np.r_[0.1,0.1], args=(acc_ratio,r))
         return a, b
 
     def new_point(self, Ecut, coords, **kwargs):
@@ -624,7 +636,7 @@ if __name__ == "__main__":
 
     def sampler(E, coords, **kwargs):
         coords = random_coords(E)
-        Enew = pot.getEnergy(coords)##E * np.random.power(n/2.)
+        Enew = pot.getEnergy(coords)
         res = Result(energy=Enew, stepsize=1., coords=coords, grad=np.array([1.]))
         return res
 
@@ -651,8 +663,8 @@ if __name__ == "__main__":
     gsampler = GalileanSampler(
         pot, nsteps=100, nadapt=3, maxreject=100, stepsize=0.02,
         acc_ratio=0.1, theta=1.3)
-
-    for i in xrange(20):
+    
+    for i in xrange(1):
         gsamples = np.array([gsampler(1, m.coords).energy for i in xrange(nsamples)])
         gsamples.sort()
         plt.plot(gsamples, (l - 0.5*k*np.log(gsamples))/lstd)

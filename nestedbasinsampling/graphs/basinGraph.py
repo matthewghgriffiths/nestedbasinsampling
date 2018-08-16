@@ -232,18 +232,27 @@ class BasinGraph(object):
     """ This class joins replicas in the ReplicaClass together
     as a set of super basins.
     """
-    def __init__(self, replicaGraph, merge_BF=-1.,
-                 dof=None, max_energy=np.inf, debug=True):
+    def __init__(self, replicaGraph, merge_BF=None, minlive=100,
+                 nlowest_minima=2, log_step=5., dof=None, max_energy=np.inf,
+                 debug=True):
         """
         """
         self.repGraph = replicaGraph
         self.dof = dof
         self._connectgraph = nx.Graph()
         self._disconnectgraph = None
-        self.debug=debug
-        #self._initialize(max_energy, merge_BF)
-
+        self.debug = debug
+        
+        self._initialize(max_energy, merge_BF)
+        # Merge basins with not enough runs/not low enough energy
+        self.regroup_minima(minlive=minlive, lowest=nlowest_minima)
+        # Build nested basin graph
+        start_basin = self.find_top_basin(log_step)
+        self.merge_runs(start_basin, log_step=log_step)
+                            
     def SuperBasin(self, energy, minima={}, log_vol=None, log_vol2=None):
+        """
+        """
         newbasin = SuperBasin(
             energy, minima=minima, log_vol=log_vol, log_vol2=log_vol2)
         self.graph.add_node(newbasin)
@@ -251,8 +260,8 @@ class BasinGraph(object):
         return newbasin
         
     def minimum_run(self, m, 
-                     max_energy=np.inf, 
-                     merge_BF=None, log_step=1., pa=0.5, pb=0.5):
+                    max_energy=np.inf, 
+                    merge_BF=None, log_step=1., pa=0.5, pb=0.5):
         """
         """
         nrun = self.repGraph.nested_run(m).split(max_energy, None)
@@ -731,7 +740,8 @@ class BasinGraph(object):
         return c_node, edge
 
     def calc_log_volume_up(self, basin, force_calc=False):
-        """"""
+        """
+        """
         node = self.graph.node[basin]
 
         try:
