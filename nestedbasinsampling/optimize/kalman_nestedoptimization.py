@@ -44,7 +44,9 @@ class NestedOptimizerKalman(object):
     sqstr= ("NOPT > Starting quench,      E ={:10.4g}, "
             "niter  = {:9d}")
     qstr = ("NPOT > Quench config,        E ={:10.4g}, nsteps = {:9d}, "
-            "rms  ={:10.5g}")
+            "rms  ={:10.5g}"
+
+
     def __init__(self, X, pot, sampler, stepsize=0.1, target_acc=0.4,
                  MC_steps=20, tol=1e-1, nsave=10, nwait=1,
                  kalman_discount=10., kalman_var=1.,
