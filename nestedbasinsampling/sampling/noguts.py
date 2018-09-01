@@ -4,24 +4,92 @@ from collections import namedtuple
 import numpy as np
 from numpy.random import uniform
 
+from pele.optimize import lbfgs_cpp
+from pele.mindist import findrotation
+
 from nestedbasinsampling.structure.constraints import BaseConstraint
 from nestedbasinsampling.sampling.galilean import BaseSampler
 from nestedbasinsampling.sampling.takestep import random_step
 from nestedbasinsampling.utils import Result
 
+try:
+    from fortran.noguts import noguts
+    has_fortran = True
+except ImportError:
+    noguts = None
+    has_fortran = False
 
 class NoGUTSSampler(BaseSampler):
     """
     """
+    noguts = noguts
+    has_fortran = has_fortran
     def __init__(
-        self, pot, genstep=random_step, constraint=None,
-        nsteps=10, nadapt=10, stepsize=0.1, acc_ratio=0.1,
+        self, pot, genstep=None, constraint=None,
+        linear_momentum=False, angular_momentum=False,
+        nsteps=10, stepsize=0.1, max_depth=None,
+        min_rotation=False, fix_centroid=False,
         testinitial=True, fixConstraint=False, maxreject=1000, debug=False):
 
         self.pot = pot
-        self.genstep = random_step
+        if genstep is not None:
+            self.genstep = genstep
         self.constraint = BaseConstraint() if constraint is None else constraint
+        self.stepsize =  stepsize
+        self.nsteps = nsteps
+        self.testinitial = testinitial
+        self.max_depth = max_depth
+        self.debug = debug
+        self.linear_momentum = linear_momentum
+        self.angular_momentum = angular_momentum
+        self.min_rotation = min_rotation
+        self.fix_centroid = fix_centroid
 
+        self._set_fortran(self.has_fortran)
+
+        if callable(fixConstraint):
+            self.fixConstraint = fixConstraint
+        elif fixConstraint:
+            self.fixConstraint = self._fixConstraint
+        else:
+            def not_implemented(*arg, **kwargs):
+                raise NotImplementedError
+            self.fixConstraint = not_implemented
+
+    def _set_fortran(self, has_fortran):
+        if has_fortran:
+            self.build_tree = self._f_build_tree
+            self.stop_criterion = self._f_stop_criterion
+        else:
+            self.build_tree = self._py_build_tree
+            self.stop_criterion = self._py_stop_criterion
+
+    def genstep(self, coords):
+        p = random_step(coords)
+
+        if self.linear_momentum:
+            # Removing linear momentum
+            p3d = p.reshape(-1, 3)
+            p3d -= p3d.mean(0)[None, :]
+
+        if self.angular_momentum:
+            # Removing angular momentum
+            p3d = p.reshape(-1, 3)
+            X = coords.reshape(-1, 3)
+            X0 = X - X.mean(0)[None,:]
+            X2, XY, ZX, Y2, YZ, Z2 = (X0[:,[0, 0, 0, 1, 1, 2]] *
+                                      X0[:, [0, 1, 2, 1, 2, 2]]).sum(0)
+            I = np.array([[Y2 + Z2, -XY, -ZX],
+                          [-XY, X2 + Z2, -YZ],
+                          [-ZX, -YZ, X2 + Y2]])
+            L = np.cross(X0, p3d).sum(0)
+            omega = np.linalg.inv(I).dot(L)
+            p3d -= np.cross(omega, X0)
+
+        if self.angular_momentum or self.linear_momentum:
+            p /= np.linalg.norm(p)
+
+        return p
 
     def take_step(self, coords, p, Ecut, epsilon=1.0):
         new_coords = coords + p * epsilon #* uniform()
@@ -50,18 +118,37 @@ class NoGUTSSampler(BaseSampler):
         coords = np.array(coords)
         p = np.array(p)
         while True:
-            coords, (p, _), (newE, newG), _ = self.take_step(
+            coords, (p, _), (newE, newG), (_, _, reject) = self.take_step(
                 coords, p, Ecut, epsilon=epsilon)
-            yield (newE, newG, coords, p)
+            yield (newE, newG, coords, p, not reject)
 
     def integrate(self, coords, p, Ecut, epsilon=0.01, nsteps=16):
         integrator = self.integrator(coords, p, Ecut, epsilon=epsilon)
-        Es, Gs, path, ps = map(
+        Es, Gs, path, ps, accepts = map(
             np.array, zip(*(
                 point for _, point in zip(xrange(nsteps), integrator))))
-        return Es, Gs, path, ps
+        return Es, Gs, path, ps, accepts
 
-    def build_tree(self, X, p, EG, Ecut, v, j, epsilon):
+    def _f_build_tree(self, X, p, EG, Ecut, v, j, epsilon):
+        X = np.asanyarray(X)
+        p_f, p_b = np.asanyarray(p[0]), np.asanyarray(p[1])
+        X_pls = X.copy()
+        X_min = X.copy()
+        p_pls_f, p_pls_b = p_f.copy(), p_b.copy()
+        p_min_f, p_min_b = p_f.copy(), p_b.copy()
+
+        X_n, E_n, G_n, naccept, nreject, tot_accept, tot_reject, valid = \
+            self.noguts.build_tree(
+                X_pls, p_pls_f, p_pls_b, X_min, p_min_f, p_min_b, v, j, Ecut,
+                epsilon, self.pot.getEnergyGradient, self.constraint.getEnergyGradient)
+
+        EG_n = E_n, G_n
+        p_m =  p_min_f, p_min_b
+        p_p = p_pls_f, p_pls_b
+        return (X_min, p_m, None, X_pls, p_p, None, X_n, None, EG_n,
+                naccept, nreject, tot_accept, tot_reject, valid)
+
+    def _py_build_tree(self, X, p, EG, Ecut, v, j, epsilon):
         """The main recursion."""
         if (j == 0):
             # Base case: Take a single leapfrog step in the direction v.
@@ -80,47 +167,52 @@ class NoGUTSSampler(BaseSampler):
 
             accept = Eaccept and Caccept
             # Count the number of reflections
-            nreflect = int(reflect)
+            tot_reject = nreject = int(reflect)
             # Is the new point in the slice?
-            nprime = int(accept)
-            valid = True # sprime
+            tot_accept = naccept = int(accept)
+            valid = True
         else:
             # Recursion: Implicitly build the height j-1 left and right subtrees.
             X_m, p_m, EG_m, X_p, p_p, EG_p, X_n, p_n, EG_n, \
-            nprime, valid, nreflect = self.build_tree(
+            naccept, nreject, tot_accept, tot_reject, valid = self._py_build_tree(
                 X, p, EG, Ecut, v, j - 1, epsilon)
             # No need to keep going if the stopping criteria were met in
             # the first subtree.
             if valid:
                 if (v == -1):
                     X_m, p_m, EG_m, _, _, _, X_n2, p_n2, EG_n2, \
-                    nprime2, valid2, nreflect2 = self.build_tree(
-                        X_m, p_m, EG_m, Ecut, v, j - 1, epsilon)
+                    naccept2, nreject2, tot_accept2, tot_reject2, valid2 \
+                        = self._py_build_tree(
+                            X_m, p_m, EG_m, Ecut, v, j - 1, epsilon)
                 else:
                     _, _, _, X_p, p_p, EG_p, X_n2, p_n2, EG_n2, \
-                    nprime2, valid2, nreflect2 = self.build_tree(
-                        X_p, p_p, EG_p, Ecut, v, j - 1, epsilon)
+                    naccept2, nreject2, tot_accept2, tot_reject2, valid2 \
+                        = self._py_build_tree(
+                            X_p, p_p, EG_p, Ecut, v, j - 1, epsilon)
                 # Choose which subtree to propagate a sample up from.
                 if valid2:
-                    if nprime2:
-                        prob_new_sample =  (float(nprime2)
-                            / max(float(int(nprime) + int(nprime2)), 1.))
+                    if naccept2:
+                        prob_new_sample =  (float(naccept2)
+                            / max(float(int(naccept) + int(naccept2)), 1.))
                         take_new_sample = np.random.uniform() < prob_new_sample
                         if take_new_sample:
                             X_n = X_n2
                             EG_n = EG_n2
 
                         # Update the number of valid points.
-                        nprime += nprime2
+                        naccept += naccept2
                     # Update the acceptance probability statistics.
-                    nreflect += nreflect2
+                    nreject += nreject2
 
-                # Update the stopping criterion.
-                valid = int(valid2 and
-                            self.stop_criterion(X_m, X_p, p_m, p_p))
+                    # Update the stopping criterion.
+                    valid = self.stop_criterion(X_m, X_p, p_m, p_p)
+                else:
+                    valid = False
+                tot_accept += tot_accept2
+                tot_reject += tot_reject2
 
         return (X_m, p_m, EG_m, X_p, p_p, EG_p, X_n, p_n, EG_n,
-                nprime, valid, nreflect)
+                naccept, nreject, tot_accept, tot_reject, valid)
 
     def nuts_step(self, coords, Ecut, epsilon=1., energy=None, grad=None):
         """
@@ -146,15 +238,15 @@ class NoGUTSSampler(BaseSampler):
         res.energy, res.grad = EG
         res.Ecut = Ecut
         res.success = False
-        res.nslice = 0
-        res.nreflect = 0
+        res.naccept = 0
+        res.nreject = 0
         res.epsilon = epsilon
         res.depth = 0
         res.NUTS = None
 
         j = 0  # initial height j = 0
-        n = 0  # Initially the only valid point is the initial point.
-        nreflect = 0 # number of reflections
+        tot_accept = naccept = 0
+        tot_reject = nreject = 0
         valid = True  # Main loop: will keep going until accept == False
 
         while valid:
@@ -164,50 +256,115 @@ class NoGUTSSampler(BaseSampler):
             # Double the size of the tree.
             if (v == -1):
                 X_m, p_m, EG_m, _, _, _, X_n, p_n, EG_n, \
-                nprime2, valid2, nreflect2 = self.build_tree(
-                    X_m, p_m, EG_m, Ecut, v, j, epsilon)
+                naccept2, nreject2, tot_accept2, tot_reject2, valid2 \
+                    = self.build_tree(X_m, p_m, EG_m, Ecut, v, j, epsilon)
             else:
                 _, _, _, X_p, p_p, EG_p, X_n, p_n, EG_n, \
-                nprime2, valid2, nreflect2 = self.build_tree(
-                    X_p, p_p, EG_p, Ecut, v, j, epsilon)
+                naccept2, nreject2, tot_accept2, tot_reject2, valid2 \
+                    = self.build_tree(X_p, p_p, EG_p, Ecut, v, j, epsilon)
 
             # Use Metropolis-Hastings to decide whether or not to move to a
             # point from the half-tree we just generated.
+            tot_accept += tot_accept2
+            tot_reject += tot_reject2
             if valid2:
-                _tmp = float(nprime2) / max(float(n), 1.)
-                n += nprime2 # not sure if this should be here
-                nreflect += nreflect2
+                _tmp = float(naccept2) / max(float(naccept), 1.)
+                naccept += naccept2 # not sure if this should be here
+                nreject += nreject2
                 if _tmp > 1. or (uniform() < _tmp):
                     res.coords = X_n[:]
                     res.p = p_n
                     res.energy, res.grad = EG_n
-                    res.nslice = n
-                    res.nreflect = nreflect
                     res.success = True
                     res.NUTS = True
+                res.naccept = naccept
+                res.nreject = nreject
+
                 # Update number of valid points we've seen.
                 # Decide if it's time to stop.
                 if not self.stop_criterion(X_m, X_p, p_m, p_p):
+                    res.success = True
                     res.NUTS = True
                     break
                 else:
                     # Increment depth.
                     j += 1
+                    # break out of loop if j is at max depth
+                    if j == self.max_depth:
+                        res.success = True
+                        res.NUTS = False
+                        break
             else:
                 # Next tree proposal not valid, rejecting and ending loop
                 res.success = True
                 res.NUTS = False
                 break
 
-        if n == 0:
+        if res.naccept == 0:
             res = self.nuts_step(
                 coords, Ecut, epsilon=epsilon, energy=energy, grad=grad)
             res.depth += 1
-            
+
+        res.tot_accept = tot_accept
+        res.tot_reject = tot_reject
+        res.tot_step = res.tot_accept + res.tot_reject
+        res.nstep = res.naccept + res.nreject
+
         return res
 
-    @staticmethod
-    def stop_criterion(X_m, X_p, p_m, p_p):
+    def __call__(self, Ecut, coords, stepsize=None, nsteps=None):
+        """ Samples a new point within the energy contour defined by Ecut
+        starting from coords.
+        """
+        stepsize = self.stepsize if stepsize is None else stepsize
+        nsteps = self.nsteps if nsteps is None else nsteps
+
+        res = Result()
+        res.naccept = 0
+        res.nreject = 0
+        res.tot_accept = 0
+        res.tot_reject = 0
+        res.stepsize = stepsize
+        res.niter = nsteps
+        res.energies = []
+
+        newcoords = np.array(coords)
+
+        if self.testinitial:
+            Econ = self.constraint.getEnergy(newcoords)
+            if Econ > 0:
+                try:
+                    newcoords = self.fixConstraint(newcoords)
+                except NotImplementedError:
+                    raise SamplingError(
+                        "Starting configuration doesn't satisfy constraint",
+                        Estart=Enew, Econstraint=Econ)
+
+
+        E, G = None, None
+        i = 0
+        while i < nsteps:
+            newres = self.nuts_step(
+                coords, Ecut, epsilon=stepsize, energy=E, grad=G)
+            if newres.naccept:
+                newcoords = newres.coords
+                E = newres.energy
+                G = newres.grad
+                res.naccept += newres.naccept
+                res.nreject += newres.nreject
+                res.tot_accept += newres.tot_accept
+                res.tot_reject += newres.tot_reject
+
+                res.energies.append(E)
+                i += 1
+
+        res.coords = newres.coords
+        res.energy = newres.energy
+        res.grad = newres.grad
+
+        return res
+
+    def _f_stop_criterion(self, X_m, X_p, p_m, p_p):
         """ Compute the stop condition in the main loop
         dot(dtheta, rminus) >= 0 & dot(dtheta, rplus >= 0)
 
@@ -223,9 +380,45 @@ class NoGUTSSampler(BaseSampler):
         criterion: bool
             return if the condition is valid
         """
+        return self.noguts.stop_criterion(X_p, p_p[0], X_m, p_m[1])
+
+    def _py_stop_criterion(self, X_m, X_p, p_m, p_p):
+        """ Compute the stop condition in the main loop
+        dot(dtheta, rminus) >= 0 & dot(dtheta, rplus >= 0)
+
+        INPUTS
+        ------
+        thetaminus, thetaplus: ndarray[float, ndim=1]
+            under and above position
+        rminus, rplus: ndarray[float, ndim=1]
+            under and above momentum
+
+        OUTPUTS
+        -------
+        criterion: bool
+            return if the condition is valid
+        """
+        if self.fix_centroid:
+            X_p = (X_p.reshape(-1,3) - X_p.reshape(-1,3).mean(0)[None,:])
+            X_m = (X_m.reshape(-1,3) - X_m.reshape(-1,3).mean(0)[None,:])
+
+        if self.min_rotation:
+            _, M = findrotation(X_p, X_m)
+            X_m = X_m.reshape(-1,3).dot(M.T)
+            p_m = (p_m[0], p_m[1].reshape(-1,3).dot(M.T).ravel())
+
         delta = X_p.ravel() - X_m.ravel()
-        return ((np.dot(delta, p_m[1].T) >= 0) & \
+        return ((np.dot(delta, p_m[1].T) >= 0) and
                 (np.dot(delta, p_p[0].T) >= 0))
+
+    def _fixConstraint(self, coords, **kwargs):
+        coords = np.array(coords) # Make a copy
+        conpot = self.constraint.getGlobalPotential(coords)
+        disp = np.zeros(3)
+        res = lbfgs_cpp(disp, conpot, **kwargs)
+        pos = coords.reshape(-1,3)
+        pos += res.coords[None,:]
+        return coords
 
 
 
@@ -325,14 +518,68 @@ if __name__ == "__main__":
     Es = np.array([pot.getEnergy(random_coords(Ecut)) for i in range(nsamples)])
 
 
-    coords = random_coords(Ecut) * 0
+    coords = random_coords(Ecut)
+    results = []
+    for i in tqdm(xrange(nsamples)):
+        rs = []
+        pos = coords
+        while len(rs) < 10:
+            r = nuts.nuts_step(pos, Ecut, epsilon=0.02)
+            if r.naccept:
+                rs.append(r)
+                pos = rs[-1].coords
+        results.append(rs)
+
+    nEs = np.array([[r.energy for r in rs] for rs in results])
+    nEs.sort(0)
+    for Es in nEs.T[5:]:
+        plt.plot(Es**(0.5*k), ((l - 0.5*k*np.log(Es))/lstd))
+
+
+
+    pstr = "E_m={:6.5g}, E_p={:6.5g}, E_n={:6.5g}, a={:2d}, r={:2d}, ta={:2d}, tr={:2d}, v={:2d}"
+
+    def print_output(coords, p, v, j, Ecut, epsilon, build_tree):
+        X_m, p_m, EG_m, X_p, p_p, EG_p, X_n, p_n, EG_n, \
+        nprime, nreflect, tot_accept, tot_reject, valid = build_tree(
+            coords, (p, p), None, Ecut, v, j, epsilon)
+        print pstr.format(
+            pot.getEnergy(X_m), pot.getEnergy(X_p), EG_n[0],
+            nprime, nreflect, tot_accept, tot_reject, valid)
+        return (X_m, p_m, EG_m, X_p, p_p, EG_p, X_n, p_n, EG_n,
+                nprime, nreflect, tot_accept, tot_reject, valid)
+
+
+    coords = random_coords(Ecut)
+    p = nuts.genstep(coords)
+
+    for j in range(10):
+        print j
+        v = -1
+        print_output(coords, p, v, j, Ecut, epsilon, nuts._py_build_tree)
+        print_output(coords, p, v, j, Ecut, epsilon, nuts._f_build_tree)
+        v = 1
+        print_output(coords, p, v, j, Ecut, epsilon, nuts._py_build_tree)
+        print_output(coords, p, v, j, Ecut, epsilon, nuts._f_build_tree)
+
+
+    X_m, p_m, EG_m, X_p, p_p, EG_p, X_n, p_n, EG_n, \
+        nprime, nreflect, tot_accept, tot_reject, valid = \
+            print_output(coords, p, v, j, Ecut, epsilon, nuts._py_build_tree)
+    print nuts.stop_criterion(X_m, X_p, p_m, p_p), noguts.stop_criterion(X_p, p_p[0], X_m, p_m[1])
+    X_m, p_m, EG_m, X_p, p_p, EG_p, X_n, p_n, EG_n, \
+        nprime, nreflect, tot_accept, tot_reject, valid = \
+            print_output(coords, p, v, j, Ecut, epsilon, nuts._f_build_tree)
+    print nuts.stop_criterion(X_m, X_p, p_m, p_p), noguts.stop_criterion(X_p, p_p[0], X_m, p_m[1])
+
+if 0:
     results = []
     for i in tqdm(xrange(nsamples)):
         rs = []
         pos = coords
         while len(rs) < 20:
             r = nuts.nuts_step(pos, Ecut, epsilon=0.02)
-            if r.nslice:
+            if r.naccept:
                 rs.append(r)
                 pos = rs[-1].coords
         results.append(rs)

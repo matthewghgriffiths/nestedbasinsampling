@@ -224,7 +224,7 @@ if __name__ == "__main__":
     nuts = ExplicitNoGUTSSampler(pot)
     self = nuts
     Ecut = 1.
-    epsilon = 0.2
+    epsilon = 0.1
     energy = None
     grad = None
 

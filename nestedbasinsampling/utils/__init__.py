@@ -7,3 +7,4 @@ from .events import Signal
 from .sortedcollection import SortedCollection
 from .errors import *
 from .result import Result
+from .kalman import LinearKalmanFilter

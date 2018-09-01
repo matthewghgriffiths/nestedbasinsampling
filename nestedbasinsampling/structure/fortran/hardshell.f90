@@ -17,7 +17,7 @@ e = 0.d0
 do j=1, natoms
     dr(:) = coords(3*(j-1)+1 : 3*(j-1) + 3)
     r2 = sum(dr(:)**2)
-    if (r2 > r2cut) e = e + sqrt(r2) - radius
+    if (r2 > r2cut) e = e + (r2 - r2cut)/2 !sqrt(r2) - radius
 enddo
 
 end subroutine hardshellenergy
@@ -39,9 +39,9 @@ do j=1, natoms
     dr(:) = coords(3*(j-1)+1 : 3*(j-1) + 3)
     r2 = sum(dr(:)**2)
     if (r2 > r2cut) then
-        r = sqrt(r2)
-        e = e + r - radius
-        grad(3*(j-1)+1 : 3*(j-1) + 3) = coords(3*(j-1)+1 : 3*(j-1) + 3)/r
+        !r = sqrt(r2)
+        e = e + (r2 - r2cut)/2 !r - radius
+        grad(3*(j-1)+1 : 3*(j-1) + 3) = coords(3*(j-1)+1 : 3*(j-1) + 3)!/r
     endif
 enddo
 

@@ -51,7 +51,7 @@ class BaseSampler(object):
         self.acc_ratio = acc_ratio
         self.r = r
         self.a, self.b = self._calcStepFactors(self.acc_ratio, r)
-        return self.a, self.b 
+        return self.a, self.b
 
     def _calcStepFactors(self, acc_ratio, r):
         """
@@ -663,7 +663,7 @@ if __name__ == "__main__":
     gsampler = GalileanSampler(
         pot, nsteps=100, nadapt=3, maxreject=100, stepsize=0.02,
         acc_ratio=0.1, theta=1.3)
-    
+
     for i in xrange(1):
         gsamples = np.array([gsampler(1, m.coords).energy for i in xrange(nsamples)])
         gsamples.sort()
@@ -921,6 +921,3 @@ if False:
     steps -= steps.mean()
     autocorr = np.correlate(steps, steps, mode='same')
     plt.plot(autocorr)
-
-
-

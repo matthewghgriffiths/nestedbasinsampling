@@ -12,7 +12,7 @@ except:
     fortran = False
 
 class BaseConstraint(BasePotential):
-
+    G = np.empty(0)
     def __call__(self, coords):
         return self.getEnergy(coords) <= 0.
 
@@ -20,7 +20,9 @@ class BaseConstraint(BasePotential):
         return 0.
 
     def getGradient(self, coords):
-        return np.zeros_like(coords)
+        if self.G.shape != np.shape(coords):
+            self.G = np.zeros_like(coords)
+        return self.G
 
     def getEnergyGradient(self, coords):
         return self.getEnergy(coords), self.getGradient(coords)
@@ -109,11 +111,11 @@ class f90_HardShellConstraint(BaseConstraint):
         self.r = radius
 
     def getEnergy(self, coords):
-        return hardshell.hardshellenergy(coords.ravel(), self.r)
+        return hardshell.hardshellenergy(coords, self.r)
 
     def getEnergyGradient(self, coords):
-        e, grad = hardshell.hardshellenergy_gradient(coords.ravel(), self.r)
-        return e, grad.reshape(coords.shape)
+        e, grad = hardshell.hardshellenergy_gradient(coords, self.r)
+        return e, grad
 
     def getGradient(self, coords):
         return self.getEnergyGradient(coords)[1]
