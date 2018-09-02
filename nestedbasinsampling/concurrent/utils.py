@@ -7,7 +7,7 @@ import logging
 from future.utils import iteritems
 
 
-logger = logging.getLogger('nbs.utils')
+logger = logging.getLogger('nbs.concurrent.utils')
 
 # timeout for the Queue object put/get blocking methods.
 # it should really be infinity, but then keyboard interrupts don't work.

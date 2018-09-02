@@ -7,8 +7,19 @@ import Pyro4
 from .base import BasePyro, LOG_CONFIG
 from . import utils
 
-logger = logging.getLogger('nbs.remote_manager')
+logger = logging.getLogger('nbs.concurrent.manager')
 Pyro4.config.SERVERTYPE = "multiplex"
+
+class BaseManager(object):
+
+    def receive_work(self, work):
+        raise NotImplementedError
+
+    def get_job(self):
+        raise NotImplementedError
+
+    def stop_criterion(self):
+        return False
 
 @Pyro4.expose
 class RemoteManager(BasePyro):
@@ -40,7 +51,7 @@ class RemoteManager(BasePyro):
     @Pyro4.oneway
     def receive_output(self, worker_name, job_id, work):
         logger.debug("%s finished job #%i" % (worker_name, job_id))
-        self.finished_work.put((job_id, work))
+        self.finished_work.put((job_id, work), block=True)
         if worker_name not in self.workers:
             with utils.getNS(**self.nameserver_kw) as ns:
                 self.workers[worker_name] =  Pyro4.Proxy(
@@ -49,9 +60,9 @@ class RemoteManager(BasePyro):
 
 
     def main_loop(self):
-        """This method is repeatedly called whilst this object is running 
+        """This method is repeatedly called whilst this object is running
         """
-        while self.finished_work.qsize():
+        while not self.finished_work.empty():
             try:
                 job_id, work = self.finished_work.get()
                 self.manager.receive_work(work)

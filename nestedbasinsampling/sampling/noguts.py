@@ -1,16 +1,17 @@
+# -*- coding: utf-8 -*-
+import logging
 
-from math import sqrt
-from collections import namedtuple
 import numpy as np
 from numpy.random import uniform
+from scipy.special import psi, polygamma
 
 from pele.optimize import lbfgs_cpp
 from pele.mindist import findrotation
 
-from nestedbasinsampling.structure.constraints import BaseConstraint
-from nestedbasinsampling.sampling.galilean import BaseSampler
-from nestedbasinsampling.sampling.takestep import random_step
-from nestedbasinsampling.utils import Result
+from ..structure import BaseConstraint
+from ..utils import Result, LinearKalmanFilter
+from .galilean import BaseSampler
+from .takestep import random_step
 
 try:
     from fortran.noguts import noguts
@@ -18,6 +19,8 @@ try:
 except ImportError:
     noguts = None
     has_fortran = False
+
+logger = logging.getLogger('NBS.NoGUTS')
 
 class NoGUTSSampler(BaseSampler):
     """
@@ -307,7 +310,7 @@ class NoGUTSSampler(BaseSampler):
 
         res.tot_accept = tot_accept
         res.tot_reject = tot_reject
-        res.tot_step = res.tot_accept + res.tot_reject
+        res.nfev = res.tot_accept + res.tot_reject
         res.nstep = res.naccept + res.nreject
 
         return res
@@ -324,6 +327,7 @@ class NoGUTSSampler(BaseSampler):
         res.nreject = 0
         res.tot_accept = 0
         res.tot_reject = 0
+        res.nfev = 0
         res.stepsize = stepsize
         res.niter = nsteps
         res.energies = []
@@ -354,6 +358,7 @@ class NoGUTSSampler(BaseSampler):
                 res.nreject += newres.nreject
                 res.tot_accept += newres.tot_accept
                 res.tot_reject += newres.tot_reject
+                res.nfev += newres.nfev
 
                 res.energies.append(E)
                 i += 1
@@ -419,6 +424,43 @@ class NoGUTSSampler(BaseSampler):
         pos = coords.reshape(-1,3)
         pos += res.coords[None,:]
         return coords
+
+    def determine_stepsize(self, coords, Ecut, stepsize=None, target_acc=0.4,
+                           nsteps=200, nadapt=30):
+        stepsize = self.stepsize if stepsize is None else stepsize
+
+        logger.info(
+            ("determining stepsize, initial stepsize={:6.2g}, "
+             "target_acc={:6.2g}, nsteps={:3d}, nadapt={:2d}").format(
+                stepsize, target_acc, nsteps, nadapt))
+        f = (1 - target_acc)/target_acc
+        kalman = LinearKalmanFilter(z=np.log(stepsize) - np.log(f), R=1.)
+        stepsizes = [stepsize]
+        for i in xrange(nadapt):
+            p = self.genstep(coords)
+            last = stepsize
+            Es, Gs, path, ps, accepts = self.integrate(
+                coords, p, Ecut, epsilon=stepsize, nsteps=nsteps)
+            naccept = accepts.sum()
+            if naccept:
+                coords = path[accepts][-1]
+            nreject = nsteps - naccept
+            acc = float(naccept)/nsteps
+            n, m = naccept/10. + 0.5, nreject/10. + 0.5
+            m = psi(n) - psi(m)
+            v = polygamma(1, n) + polygamma(1, m)
+            a0 = m + np.log(stepsize)
+            a1, v1 = kalman(a0, v)
+            stepsize = np.exp(a1)*f
+            stepsizes.append(stepsize)
+
+            logger.debug(
+                "naccept={:3d}, nreject={:3d}, stepsize={:6.2g}".format(
+                    naccept, nreject, stepsize))
+
+        logger.info("final stepsize={:6.2g}, acc={:6.2g}".format(
+            stepsize, float(naccept)/float(naccept + nreject)))
+        return stepsizes
 
 
 

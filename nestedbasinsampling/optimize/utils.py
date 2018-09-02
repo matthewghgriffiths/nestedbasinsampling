@@ -5,7 +5,7 @@ from collections import defaultdict
 import numpy as np
 from pele.optimize import lbfgs_cpp
 
-from nestedbasinsampling.utils import dict_update_keep, Result
+from ..utils import dict_update_keep, Result
 
 class BasinPotential(object):
     """

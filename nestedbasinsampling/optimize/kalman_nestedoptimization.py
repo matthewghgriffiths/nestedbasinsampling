@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
-
+import logging
 from collections import defaultdict, deque
 
-import numpy as np
 from scipy.special import psi, polygamma
+import numpy as np
+
 from pele.optimize import lbfgs_cpp
 
-from nestedbasinsampling.sampling import SamplingError
-from nestedbasinsampling.utils import (Result, NestedSamplingError,
-                                       dict_update_keep, LinearKalmanFilter)
+from ..utils import (
+    Result, NestedSamplingError, SamplingError, dict_update_keep,
+    LinearKalmanFilter)
+
+logger = logging.getLogger('NBS.NestedOptimizer')
 
 class NestedOptimizerKalman(object):
     """
@@ -39,14 +42,6 @@ class NestedOptimizerKalman(object):
         energy and gradient of the initial point will not be calculated, saving
         one potential call.
     """
-    pstr = ("NOPT > niters  ={:4d}, Ecut   ={:10.5g}, "
-            "rms  ={:10.5g}, stepsize = {:8.4g}")
-    sqstr= ("NOPT > Starting quench,      E ={:10.4g}, "
-            "niter  = {:9d}")
-    qstr = ("NPOT > Quench config,        E ={:10.4g}, nsteps = {:9d}, "
-            "rms  ={:10.5g}"
-
-
     def __init__(self, X, pot, sampler, stepsize=0.1, target_acc=0.4,
                  MC_steps=20, tol=1e-1, nsave=10, nwait=1,
                  kalman_discount=10., kalman_var=1.,
@@ -88,14 +83,6 @@ class NestedOptimizerKalman(object):
         self.alternate_stop_criterion = alternate_stop_criterion
         self.debug = debug  # print debug messages
 
-        if energy is None and gradient is None:
-            self.E, self.G = self.pot.getEnergyGradient(self.X)
-        elif gradient is None:
-            self.E = energy
-            self.G = self.pot.getGradient(self.X)
-        else:
-            self.E = energy
-            self.G = gradient
 
         self.rms = np.inf
         self.Ediff = np.inf
@@ -105,6 +92,16 @@ class NestedOptimizerKalman(object):
         self.tot_rejects = 0
         self.tot_steps = 0
         self.naccept = defaultdict(int)
+
+
+        if energy is None:
+            self.E, self.G = self.pot.getEnergyGradient(self.X)
+            self.nfev = 1
+        else:
+            self.E = energy
+            self.G = gradient
+            self.nfev = 0
+
         self.result = Result()
         self.result.naccept = 0
         self.result.nreject = 0
@@ -131,7 +128,6 @@ class NestedOptimizerKalman(object):
             v = polygamma(1, naccept) + polygamma(1, nreject)
             X1, P1 = self.kalman(m + np.log(res.stepsize), v)
             self.kalman.P = np.clip(self.kalman.P, -0.7, 0.7)
-            #X, P = self.kalman.forecast(self.nwait)
             a = X1
             self.stepsize = np.exp(a)*self._p_factor
 
@@ -157,10 +153,12 @@ class NestedOptimizerKalman(object):
                               self.last_results[-1].energy)
             else:
                 self.Ediff = np.inf
+
             self.curr_accept = res.naccept
             self.curr_reject = res.nreject
             self.Emax.append(res.energy)
             self.stepsizes.append(res.stepsize)
+            self.nfev += res.nfev
 
             self.printState(False)
 
@@ -172,7 +170,7 @@ class NestedOptimizerKalman(object):
 
         except SamplingError:
             if self.debug:
-                print "NOPT > Sampling error"
+                logger.error("Sampling error")
             self.result.message.append('Sampling Error')
 
             if self.use_quench:
@@ -186,17 +184,18 @@ class NestedOptimizerKalman(object):
 
 
     def printState(self, force=True):
+        """logs the current state"""
         cond = (self.iprint > 0 and self.iter_number%self.iprint == 0) or force
         if cond:
-            print (
-                "NOPT > niters  ={:4d}, Ecut   ={:10.5g},  rms  ={:10.5g}, "
-                "stepsize = {:8.4g}, naccept={:4d}, nreject={:4d}").format(
+            logger.debug((
+                "niters={:4d}, Ecut={:10.5g}, rms={:10.5g}, "
+                "stepsize={:8.4g}, naccept={:4d}, nreject={:4d}").format(
                     self.iter_number, self.E, self.rms, self.stepsize,
-                    self.curr_accept, self.curr_reject)
+                    self.curr_accept, self.curr_reject))
+
 
     def stop_criterion(self):
         """test the stop criterion"""
-
         if self.alternate_stop_criterion is None:
             if self.target is not None:
                 return ((self.E < self.target) or
@@ -210,6 +209,9 @@ class NestedOptimizerKalman(object):
                                                  tol=self.tol, coords=self.X)
 
     def run(self):
+        logger.info(
+            ("Starting NOpt,   E={:10.5g}, "
+             "stepsize={:6.3g}").format(self.E, self.stepsize))
         while self.iter_number < self.nsteps and not self.stop_criterion():
             try:
                 self.one_iteration()
@@ -217,22 +219,25 @@ class NestedOptimizerKalman(object):
                 self.result.message.append("problem with nested sampler")
                 break
 
-        if self.iprint > 0:
-            print self.sqstr.format(self.E, self.iter_number)
 
         self.nopt = self.iter_number
         if self.use_quench:
+            logger.info(
+                "Starting quench, E={:10.5g}, niter = {:9d}".format(
+                    self.E, self.iter_number))
             quenchres = self.quench_config()
-
-            if self.iprint > 0:
-                print self.qstr.format(
-                    quenchres.energy,quenchres.nsteps,quenchres.rms)
-
             self.X = quenchres.coords
             self.E = quenchres.energy
             self.G = quenchres.grad
             self.rms = quenchres.rms
             self.iter_number += quenchres.nsteps
+            self.nfev += quenchres.nfev
+
+        res = self.get_result()
+
+        logger.info(
+            ("Final config,    E={:10.5g}, nfev={:9d}, "
+             "rms ={:10.5g}").format(res.energy, res.nfev, res.rms))
 
         return self.get_result()
 
@@ -252,35 +257,8 @@ class NestedOptimizerKalman(object):
         res.stepsize = np.array(self.stepsizes)
         res.nsteps = self.nopt
         res.success = self.stop_criterion()
+        res.nfev = self.nfev
         return res
-
-def determine_stepsize(coords, Ecut, sampler, stepsize, target=0.4,
-                       nsteps=200, nadapt=30):
-
-    f = (1 - target)/target
-    kalman = LinearKalmanFilter(z=np.log(stepsize) - np.log(f), R=1.)
-    stepsizes = [stepsize]
-    for i in xrange(nadapt):
-        p = sampler.genstep(coords)
-        last = stepsize
-        Es, Gs, path, ps, accepts = sampler.integrate(
-            coords, p, Ecut, epsilon=stepsize, nsteps=nsteps)
-        naccept = accepts.sum()
-        if naccept:
-            coords = path[accepts][-1]
-        nreject = nsteps - naccept
-        acc = float(naccept)/nsteps
-        n, m = naccept/10. + 0.5, nreject/10. + 0.5
-        m = psi(n) - psi(m)
-        v = polygamma(1, n) + polygamma(1, m)
-        a0 = m + np.log(stepsize)
-        a1, v1 = kalman(a0, v)
-        stepsize = np.exp(a1)*f
-        stepsizes.append(stepsize)
-
-        print "{:6.3g}+/-{:6.2g}, {:6.3g}+/-{:6.2g}, {:3d}, {:3d}, {:6.2g}, {:6.2g}".format(
-            a0, v**0.5, a1, v1**0.5, naccept, nreject, last, stepsize)
-    return stepsizes
 
 if __name__ == '__main__':
 

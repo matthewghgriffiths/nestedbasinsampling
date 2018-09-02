@@ -8,3 +8,4 @@ from .sortedcollection import SortedCollection
 from .errors import *
 from .result import Result
 from .kalman import LinearKalmanFilter
+from .loggers import LOG_FORMAT, LOG_DATEFMT, LOG_CONFIG 

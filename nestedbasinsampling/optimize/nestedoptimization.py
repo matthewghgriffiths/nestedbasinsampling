@@ -6,9 +6,7 @@ import numpy as np
 from pele.optimize import lbfgs_cpp
 
 
-from nestedbasinsampling.sampling import SamplingError
-from nestedbasinsampling.utils import (Result, NestedSamplingError,
-                                       dict_update_keep)
+from ..utils import (Result, SamplingError, NestedSamplingError, dict_update_keep)
 
 class NestedOptimizer(object):
 
@@ -301,4 +299,3 @@ if __name__ == '__main__':
     plt.plot(nreflect)
     plt.plot(niter)
     plt.plot(np.clip(res.Emax - res.Emax.min(), 0, 200))
-

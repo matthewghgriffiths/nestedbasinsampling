@@ -4,7 +4,9 @@ from . import utils
 import Pyro4
 from Pyro4.util import SerializerBase, SerpentSerializer
 
-logger = logging.getLogger('nbs.base')
+from ..utils import Result
+
+logger = logging.getLogger('nbs.concurrent')
 SAVE_DEBUG = 0
 LOG_CONFIG = utils.LOG_CONFIG
 
@@ -121,6 +123,24 @@ def _register_numpy_serializers():
     SerializerBase.register_class_to_dict(np.ndarray, ndarray_to_dict)
     SerializerBase.register_dict_to_class('numpy.ndarray', dict_to_ndarray)
 
+def _register_result():
+    def result_to_dict(result):
+        #logger.debug("serialising {:s}".format(str(result)))
+        d = dict(result)
+        d['__class__'] = 'Result'
+        return d
+
+    def dict_to_result(classname, d):
+        d.pop('__class__')
+        for k, val in d.items():
+            if isinstance(val, dict) and '__class__' in val:
+                d[v] = serializer.dict_to_class(val)
+        res = Result(d)
+        #logger.debug("deserialised {:s}".format(res))
+        return res
+
+    SerializerBase.register_class_to_dict(Result, result_to_dict)
+    SerializerBase.register_dict_to_class('Result', dict_to_result)
 
 def _register_errors():
     try:
@@ -146,3 +166,4 @@ def _register_errors():
 # This ensures that the numpy arrays and queue exceptions can be serialized by Pyro
 _register_numpy_serializers()
 _register_errors()
+_register_result()

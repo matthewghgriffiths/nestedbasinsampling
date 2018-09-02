@@ -9,7 +9,7 @@ import Pyro4
 from .base import BasePyro, LOG_CONFIG
 from . import utils
 
-logger = logging.getLogger('nbs.worker')
+logger = logging.getLogger('nbs.concurrent.worker')
 SAVE_DEBUG = 0 # save intermediate models after every SAVE_DEBUG updates (0 for never)
 HUGE_TIMEOUT = 365 * 24 * 60 * 60 # one year
 
@@ -17,6 +17,11 @@ HUGE_TIMEOUT = 365 * 24 * 60 * 60 # one year
 Pyro4.config.SERVERTYPE = "multiplex"
 sys.excepthook=Pyro4.util.excepthook
 
+class BaseWorker(object):
+
+    def __call__(self, job):
+        method, args, kwargs = job
+        return job, getattr(self, method)(*args, **kwargs)
 
 @Pyro4.expose
 class RemoteWorker(BasePyro):
@@ -51,8 +56,10 @@ class RemoteWorker(BasePyro):
             try:
                 work = self.worker(job)
                 logger.debug(
-                    "successfully finished job sending".format(job_id))
+                    "successfully finished job, sending".format(job_id))
                 self.remote_manager.receive_output(self.name, job_id, work)
+                logger.debug(
+                    "%s sent work back to manager" % self.name)
             except Exception as e:
                 logger.critical(
                     "job #{:d} failed with error:".format(job_id))
@@ -61,7 +68,8 @@ class RemoteWorker(BasePyro):
             logger.debug("job queue empty")
         except Pyro4.errors.CommunicationError:
             logger.critical(
-                "%s coudn't connect to remote manager" % self.name)
+                "%s coudn't connect to remote manager, exiting" % self.name)
+            self.exit()
 
     def main_loop(self):
         """

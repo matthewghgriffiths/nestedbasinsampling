@@ -6,14 +6,15 @@ from scipy.optimize import fixed_point
 
 from pele.optimize import lbfgs_cpp
 
-from nestedbasinsampling.utils import SamplingError, Result
-from nestedbasinsampling.structure.constraints import BaseConstraint
-from nestedbasinsampling.sampling.takestep import hypersphere_step
+from ..utils import SamplingError, Result
+from ..structure.constraints import BaseConstraint
+from .takestep import hypersphere_step
 
 try:
-    from nestedbasinsampling.sampling.fortran import galilean
-    has_fortran = True
+    from fortran.galilean import galilean
+    has_fortran = False
 except ImportError:
+    galilean = None
     has_fortran = False
 
 class BaseSampler(object):
@@ -506,8 +507,7 @@ class py_GalileanSampler(BaseSampler):
         return res
 
 class f90_GalileanSampler(py_GalileanSampler):
-
-    galilean = galilean.galilean
+    galilean = galilean
 
     def set_seed(self, seed):
         self.galilean.seed = seed

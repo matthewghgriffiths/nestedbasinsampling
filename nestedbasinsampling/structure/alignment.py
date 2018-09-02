@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from nestedbasinsampling.utils import dict_update_copy
+from ..utils import dict_update_copy
 
 try:
     from fastoverlap import BranchnBoundAlignment, PeriodicAlignFortran
