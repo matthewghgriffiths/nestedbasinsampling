@@ -14,9 +14,17 @@ except ImportError:
 if have_fortran:
     align_cluster = BranchnBoundAlignment
     align_periodic = PeriodicAlignFortran
+    calc_scale = False
 else:
+    calc_scale = True
     align_cluster = SphericalAlign
     align_periodic = PeriodicAlign
+
+def _calc_scale(pos1):
+    pos1 = np.reshape(pos1, (-1, 3))
+    triu = np.triu_indices(pos1.size, 1)
+    sep = np.linalg.norm(pos1[triu[0]] - pos1[triu[1]], axis=1)
+    return sep.min()*0.3
 
 class CompareStructures(object):
     def __init__(self, perm=None, boxvec=None, natoms=None, tol=1e-2,
@@ -39,7 +47,11 @@ class CompareStructures(object):
 
         perm = kwargs.pop('perm') if kwargs.has_key('perm') else self.perm
         kw = dict_update_copy(kwargs, self.align_kw)
-        return align_cluster(perm=perm)(pos1, pos2, **kw)
+        if calc_scale:
+            scale = _calc_scale(pos1)
+            return align_cluster(scale, perm=perm)(pos1, pos2, **kw)
+        else:
+            return align_cluster(perm=perm)(pos1, pos2, **kw)
 
     def align_periodic(self, min1, min2, **kwargs):
         pos1 = np.asanyarray(min1.coords).reshape(-1,3)
