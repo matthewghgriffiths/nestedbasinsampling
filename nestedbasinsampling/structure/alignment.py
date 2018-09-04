@@ -64,7 +64,6 @@ class CompareStructures(object):
         return align(pos1, pos2, **kw)
 
     def __call__(self, min1, min2):
-        print min1.energy, min2.energy
         dist = self.align(min1, min2)[0]
         return dist < self.tol
 
