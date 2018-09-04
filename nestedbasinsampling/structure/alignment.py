@@ -22,7 +22,7 @@ else:
 
 def _calc_scale(pos1):
     pos1 = np.reshape(pos1, (-1, 3))
-    triu = np.triu_indices(pos1.size, 1)
+    triu = np.triu_indices(len(pos1), 1)
     sep = np.linalg.norm(pos1[triu[0]] - pos1[triu[1]], axis=1)
     return sep.min()*0.3
 
