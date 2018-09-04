@@ -4,7 +4,7 @@ import logging, sys
 
 from system import NBS_LJ
 from nestedbasinsampling import LOG_CONFIG, Database, Replica, Result
-from nestedbasinsampling.concurrent import RemoteManager, BaseManager
+from nestedbasinsampling.concurrent import RemoteManager, BaseManager, utils
 
 logger = logging.getLogger('nbs.lj_manager')
 
@@ -83,14 +83,26 @@ class NBS_Manager(BaseManager):
 
 
 def main():
-    pass
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG, **LOG_CONFIG)
+    options, args = utils.parse_args()
+    level = getattr(logging, options.verbosity)
+    logging.basicConfig(level=level, **LOG_CONFIG)
     logger.info("running %s" % " ".join(sys.argv))
-    logger.debug("running %s" % " ".join(sys.argv))
+    logger.info("received options={:}".format(options))
+
+    niter = options.niter
+    nameserver_kw = dict(host=options.nameserver, port=options.nsport)
+    daemon_kw = dict(host=options.host, port=options.port)
 
     system = NBS_LJ(natoms=31, stepsize=0.1)
-    manager = NBS_Manager(system, max_iter=5)
-    remote_manager = RemoteManager(manager)
+    database = options.database
+    if database is not None:
+        logger.info("connecting to database: %s" % database)
+        database = system.get_database(database)
+
+    manager = NBS_Manager(system, database=database, max_iter=5)
+    remote_manager = RemoteManager(
+        manager, nameserver_kw=nameserver_kw, daemon_kw=daemon_kw)
     remote_manager.main()
+
+if __name__ == '__main__':
+    main()

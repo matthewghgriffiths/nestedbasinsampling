@@ -32,7 +32,7 @@ def getNS(host=None, port=None, broadcast=True, hmac_key=None):
     except Pyro4.errors.NamingError:
         logger.info("Pyro name server not found; starting a new one")
 
-    subprocess.Popen(['python', '-m', 'Pyro4.naming', 'n',
+    subprocess.Popen(['python', '-m', 'Pyro4.naming', '-n',
                       '0.0.0.0' if host is None else host])
     # TODO: spawn a proper daemon ala http://code.activestate.com/recipes/278731/ ?
     # like this, if there's an error somewhere, we'll never know... (and the loop
@@ -148,3 +148,30 @@ def resolve_name(obj):
     else:
         uri = obj
     return uri[5:].split('@')[0]
+
+
+def parse_args(args=None):
+    from optparse import OptionParser
+    parser = OptionParser()
+    parser.add_option(
+        "-n", "--nameserver", dest="nameserver", help="hostname of nameserver")
+    parser.add_option(
+        "-q", "--nsport", dest="nsport", type="int", default=0,
+        help="port of nameserver")
+    parser.add_option(
+        "-l", "--host", dest="host", help="hostname to bind server on")
+    parser.add_option(
+        "-p", "--port", dest="port", type="int", default=0,
+        help="port to bind server on (0=random)")
+    parser.add_option(
+        "-i", "--niter", dest='niter', help="number of iterations to run",
+        default=1000)
+    parser.add_option(
+        "-d", "--database", dest='database', help='location of database file')
+    parser.add_option(
+        "-v", "--verbosity", dest='verbosity', default='INFO',
+        help='set logging level, options: DEBUG, INFO, CRITICAL, ERROR')
+
+    options, args = parser.parse_args(args)
+    if options.host is None: options.host = gethostname()
+    return options, args
