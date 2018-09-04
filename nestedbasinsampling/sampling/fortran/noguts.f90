@@ -1,8 +1,7 @@
-
 module noguts
 
 integer(kind=4), save :: seed=1
-
+logical, save :: remove_linear_momentum=.FALSE., remove_angular_momentum=.FALSE.
 contains
 
 function r_uniform() result(rand)
@@ -534,11 +533,135 @@ integer n
 double precision X_pls(n), p_pls_f(n), X_min(n), p_min_b(n)
 logical criterion
 
-double precision diff(n)
+integer j
+double precision diff(n), linear(3), rel_p, p_pls(n), p_min(n)
+
 
 diff(1:n) = X_pls(1:n) - X_min(1:n)
-criterion = (dot_product(diff, p_pls_f).ge.0.d0).and.(dot_product(diff, p_min_b).ge.0.d0)
 
+if (remove_angular_momentum) then
+    p_pls(:) = zero_angular_momentum(X_pls(:), p_pls_f(:), n)
+    p_min(:) = zero_angular_momentum(X_min(:), p_min_b(:), n)
+else
+    p_pls(:) = p_pls_f(:)
+    p_min(:) = p_min_b(:)
+end if
+
+if (remove_linear_momentum) then
+    linear(:) = 0.d0
+    do j=1,n-2,3
+        linear(:) = p_pls(j:j+2)
+    end do
+    linear(:) = linear(:)/dble(n)
+    rel_p = 0.d0
+    do j=1,n-2,3
+        rel_p = rel_p + dot_product(diff(j:j+2), linear(:))
+    end do
+    ! Only calculates condition for negative velocity if
+    ! the condition for the forward momentum is satified
+    if (dot_product(diff, p_pls).ge.rel_p) then
+        linear(:) = 0.d0
+        do j=1,n-2,3
+            linear(:) = p_min(j:j+2)
+        end do
+        linear(:) = linear(:)/dble(n)
+        rel_p = 0.d0
+        do j=1,n-2,3
+            rel_p = rel_p + dot_product(diff(j:j+2), linear(:))
+        end do
+
+        if (dot_product(diff, p_min).ge.rel_p) then
+            criterion = .TRUE.
+        else
+            criterion = .FALSE.
+        end if
+    else
+        criterion = .FALSE.
+    end if
+else
+    criterion = (dot_product(diff, p_pls).ge.0.d0).and.(dot_product(diff, p_min).ge.0.d0)
+end if
+
+end function
+
+function zero_angular_momentum(coords, p, n) result(new_p)
+implicit none
+
+integer n
+double precision coords(n), p(n), new_p(n)
+
+integer j
+double precision I(3,3), omega(3), R0(3), L(3)
+double precision X, Y, Z, X2, XY, ZX, Y2, YZ, Z2
+
+! Finding centre of mass
+R0(:) = 0.d0
+do j=1,n-2,3
+    R0(:) = R0(:) + coords(j:j+2)
+end do
+R0(:) = R0(:)/dble(n/3)
+
+X2 = 0.d0
+XY = 0.d0
+ZX = 0.d0
+Y2 = 0.d0
+YZ = 0.d0
+Z2 = 0.d0
+L(:) = 0.d0
+! save zeroed coordinates in new_p vector
+do j=1,n-2,3
+    new_p(j:j+2) = coords(j:j+2) - R0(:)
+    L(:) = L(:) + cross(new_p(j:j+2), p(j:j+2))
+    X2 = X2 + new_p(j)*new_p(j)
+    XY = XY + new_p(j)*new_p(j+1)
+    ZX = ZX + new_p(j+2)*new_p(j)
+    Y2 = Y2 + new_p(j+1)*new_p(j+1)
+    YZ = YZ + new_p(j+1)*new_p(j+2)
+    Z2 = Z2 + new_p(j+2)*new_p(j+2)
+end do
+
+I(1,1:3) = (/Y2 + Z2, -XY, -ZX/)
+I(2,1:3) = (/-XY, X2 + Z2, -YZ/)
+I(3,1:3) = (/-ZX, -YZ, X2 + Y2/)
+I(:,:) = matinv3(I(:,:))
+omega(:) = matmul(I(:,:), L(:))
+
+do j=1,n-2,3
+    new_p(j:j+2) = p(j:j+2) - cross(omega(:), new_p(j:j+2))
+end do
+
+end function
+
+function cross(a, b)
+implicit none
+double precision cross(3)
+double precision  a(3), b(3)
+
+cross(1) = a(2) * b(3) - a(3) * b(2)
+cross(2) = a(3) * b(1) - a(1) * b(3)
+cross(3) = a(1) * b(2) - a(2) * b(1)
+end function
+
+function matinv3(A) result(B)
+  implicit none
+  !! Performs a direct calculation of the inverse of a 3×3 matrix.
+  double precision A(3,3), B(3,3), detinv
+
+  ! Calculate the inverse determinant of the matrix
+  detinv = 1/(A(1,1)*A(2,2)*A(3,3) - A(1,1)*A(2,3)*A(3,2)&
+            - A(1,2)*A(2,1)*A(3,3) + A(1,2)*A(2,3)*A(3,1)&
+            + A(1,3)*A(2,1)*A(3,2) - A(1,3)*A(2,2)*A(3,1))
+
+  ! Calculate the inverse of the matrix
+  B(1,1) = +detinv * (A(2,2)*A(3,3) - A(2,3)*A(3,2))
+  B(2,1) = -detinv * (A(2,1)*A(3,3) - A(2,3)*A(3,1))
+  B(3,1) = +detinv * (A(2,1)*A(3,2) - A(2,2)*A(3,1))
+  B(1,2) = -detinv * (A(1,2)*A(3,3) - A(1,3)*A(3,2))
+  B(2,2) = +detinv * (A(1,1)*A(3,3) - A(1,3)*A(3,1))
+  B(3,2) = -detinv * (A(1,1)*A(3,2) - A(1,2)*A(3,1))
+  B(1,3) = +detinv * (A(1,2)*A(2,3) - A(1,3)*A(2,2))
+  B(2,3) = -detinv * (A(1,1)*A(2,3) - A(1,3)*A(2,1))
+  B(3,3) = +detinv * (A(1,1)*A(2,2) - A(1,2)*A(2,1))
 end function
 
 end module

@@ -7,7 +7,8 @@ from nestedbasinsampling import (
 
 
 default_sampler_kws = dict(
-    max_depth=7, linear_momentum=True, angular_momentum=True)
+    max_depth=7, remove_linear_momentum=True, remove_angular_momentum=True,
+    remove_initial_linear_momentum=False, remove_initial_angular_momentum=False)
 default_nopt_kws = dict(
     nsteps=2000, MC_steps=5, target_acc=0.4, nsave=10, tol=1e-2)
 default_struct_kws = dict(niter=100)

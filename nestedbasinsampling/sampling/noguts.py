@@ -28,11 +28,12 @@ class NoGUTSSampler(BaseSampler):
     noguts = noguts
     has_fortran = has_fortran
     def __init__(
-        self, pot, genstep=None, constraint=None,
-        linear_momentum=False, angular_momentum=False,
-        nsteps=10, stepsize=0.1, max_depth=None,
-        min_rotation=False, fix_centroid=False,
-        testinitial=True, fixConstraint=False, maxreject=1000, debug=False):
+        self, pot, genstep=None, constraint=None, remove_linear_momentum=False,
+        nsteps=10, stepsize=0.1, max_depth=None, remove_angular_momentum=False,
+        remove_initial_linear_momentum=False, min_rotation=False,
+        remove_initial_angular_momentum=False, fix_centroid=False,
+        seed=None, rand_state=None, testinitial=True, fixConstraint=False,
+        maxreject=1000, debug=False):
 
         self.pot = pot
         if genstep is not None:
@@ -43,26 +44,55 @@ class NoGUTSSampler(BaseSampler):
         self.testinitial = testinitial
         self.max_depth = max_depth
         self.debug = debug
-        self.linear_momentum = linear_momentum
-        self.angular_momentum = angular_momentum
+        self.remove_linear_momentum = remove_linear_momentum
+        self.remove_angular_momentum = remove_angular_momentum
+        self.remove_initial_linear_momentum = remove_initial_linear_momentum
+        self.remove_initial_angular_momentum = remove_initial_angular_momentum
         self.min_rotation = min_rotation
         self.fix_centroid = fix_centroid
 
         self._set_fortran(self.has_fortran)
+        self.set_random_state(seed, rand_state)
 
         if callable(fixConstraint):
             self.fixConstraint = fixConstraint
         elif fixConstraint:
             self.fixConstraint = self._fixConstraint
+
+    @property
+    def seed(self):
+        if has_fortran:
+            return self.noguts.seed.item()
         else:
-            def not_implemented(*arg, **kwargs):
-                raise NotImplementedError
-            self.fixConstraint = not_implemented
+            return None
+
+    @seed.setter
+    def seed(self, seed):
+        if seed is None:
+            seed = np.random.randint(0, np.iinfo(np.int32).max)
+        if has_fortran:
+            self.noguts.seed = seed
+        np.random.seed(seed)
+
+    def get_random_state(self):
+        np_state = np.random.get_state()
+        if has_fortran:
+            return self.noguts.seed.item(), np_state
+        else:
+            return None, np_state
+
+    def set_random_state(self, seed, state=None):
+        self.seed = seed
+        if state is not None:
+            np.random.set_state(state)
 
     def _set_fortran(self, has_fortran):
         if has_fortran:
             self.build_tree = self._f_build_tree
             self.stop_criterion = self._f_stop_criterion
+            self.seed = self.noguts.seed
+            self.noguts.remove_linear_momentum = self.remove_linear_momentum
+            self.noguts.remove_angular_momentum = self.remove_angular_momentum
         else:
             self.build_tree = self._py_build_tree
             self.stop_criterion = self._py_stop_criterion
@@ -70,31 +100,36 @@ class NoGUTSSampler(BaseSampler):
     def genstep(self, coords):
         p = random_step(coords)
 
-        if self.linear_momentum:
-            # Removing linear momentum
+        if self.remove_initial_linear_momentum:
             p3d = p.reshape(-1, 3)
             p3d -= p3d.mean(0)[None, :]
 
-        if self.angular_momentum:
-            # Removing angular momentum
-            p3d = p.reshape(-1, 3)
-            X = coords.reshape(-1, 3)
-            X0 = X - X.mean(0)[None,:]
-            X2, XY, ZX, Y2, YZ, Z2 = (X0[:,[0, 0, 0, 1, 1, 2]] *
-                                      X0[:, [0, 1, 2, 1, 2, 2]]).sum(0)
-            I = np.array([[Y2 + Z2, -XY, -ZX],
-                          [-XY, X2 + Z2, -YZ],
-                          [-ZX, -YZ, X2 + Y2]])
-            L = np.cross(X0, p3d).sum(0)
-            omega = np.linalg.inv(I).dot(L)
-            p3d -= np.cross(omega, X0)
+        if self.remove_initial_angular_momentum:
+            p[:] = self.zero_angular_momentum(coords, p)
 
-        if self.angular_momentum or self.linear_momentum:
+        if (self.remove_initial_linear_momentum or
+            self.remove_initial_angular_momentum):
             p /= np.linalg.norm(p)
 
         return p
 
+    def zero_angular_momentum(self, coords, p):
+        coords = np.asanyarray(coords)
+        p3d = p.reshape(-1, 3)
+        X = coords.reshape(-1, 3)
+        X0 = X - X.mean(0)[None,:]
+        X2, XY, ZX, Y2, YZ, Z2 = (X0[:, [0, 0, 0, 1, 1, 2]] *
+                                  X0[:, [0, 1, 2, 1, 2, 2]]).sum(0)
+        I = np.array([[Y2 + Z2, -XY, -ZX],
+                      [-XY, X2 + Z2, -YZ],
+                      [-ZX, -YZ, X2 + Y2]])
+        L = np.cross(X0, p3d).sum(0)
+        omega = np.linalg.inv(I).dot(L)
+        p0 = (p3d - np.cross(omega, X0)).reshape(coords.shape)
+        return p0
+
     def take_step(self, coords, p, Ecut, epsilon=1.0):
+        # TODO create interface to FORTRAN takestep subroutine
         new_coords = coords + p * epsilon #* uniform()
         new_p = p.copy()
 
@@ -424,6 +459,9 @@ class NoGUTSSampler(BaseSampler):
         pos = coords.reshape(-1,3)
         pos += res.coords[None,:]
         return coords
+
+    def fixConstraint(self, *arg, **kwargs):
+        raise NotImplementedError
 
     def determine_stepsize(self, coords, Ecut, stepsize=None, target_acc=0.4,
                            nsteps=200, nadapt=30):

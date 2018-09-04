@@ -223,7 +223,7 @@ class NestedOptimizerKalman(object):
         self.nopt = self.iter_number
         if self.use_quench:
             logger.info(
-                "Starting quench, E={:10.5g}, niter = {:9d}".format(
+                "Starting quench, E={:10.5g}, niter   = {:5d}".format(
                     self.E, self.iter_number))
             quenchres = self.quench_config()
             self.X = quenchres.coords
@@ -236,7 +236,7 @@ class NestedOptimizerKalman(object):
         res = self.get_result()
 
         logger.info(
-            ("Final config,    E={:10.5g}, nfev={:9d}, "
+            ("Final config,    E={:10.5g}, nfev ={:9d}, "
              "rms ={:10.5g}").format(res.energy, res.nfev, res.rms))
 
         return self.get_result()
