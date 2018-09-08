@@ -329,7 +329,7 @@ external constraint
 !f2py intent(out), depend(n) :: G_n2
 
 logical accept, valid2, Eaccept, Caccept
-double precision X_n2(n), E_n2, G_n2(n), prob_new, L2, M2, N2
+double precision X_n2(n), E_n2, G_n2(n), E_c, G_c(n), prob_new, L2, M2, N2
 double precision X_dummy(n), p_dummy_f(n), p_dummy_b(n)
 integer naccept2, nreject2, tot_accept2, tot_reject2, k
 
@@ -342,10 +342,10 @@ if (j.eq.0) then
         X_min(1:n) = X_min(1:n) - p_min_b(1:n) * epsilon
         ! calculate potential and constraint
         call pot(X_min, E_n, G_n, n)
-        call constraint(X_min, E_n2, G_n2, n)
+        call constraint(X_min, E_c, G_c, n)
         ! reflect off potential/constraint if new point not within contour
         Eaccept = Ecut.ge.E_n
-        Caccept = 0.d0.ge.E_n2
+        Caccept = 0.d0.ge.E_c
         if (Eaccept.and.Caccept) then
             ! do nothing
             accept = .TRUE.
@@ -354,11 +354,11 @@ if (j.eq.0) then
             accept = .FALSE.
             L2 = 0.d0
             do k=1,n
-                L2 = L2 + G_n2(k)**2
+                L2 = L2 + G_c(k)**2
             end do
             p_min_f(1:n) = p_min_b(1:n)
             p_min_b(1:n) = p_min_b(1:n) &
-                & - 2.d0 * G_n2(1:n) * dot_product(G_n2(1:n), p_min_b(1:n)) / L2
+                & - 2.d0 * G_c(1:n) * dot_product(G_c(1:n), p_min_b(1:n)) / L2
         else if(Caccept.and.(.not.Eaccept)) then
             ! reflect off gradient
             accept = .FALSE.
@@ -375,18 +375,18 @@ if (j.eq.0) then
             M2 = 0.d0
             do k=1,n
                 L2 = L2 + G_n(k)**2
-                M2 = M2 + G_n2(k)**2
+                M2 = M2 + G_c(k)**2
             end do
             L2 = sqrt(L2)
             M2 = sqrt(M2)
             N2 = 0.d0
             do k=1,n
-                G_n2(k) = G_n2(k)/M2 + G_n(k)/L2
-                N2 = N2 + G_n2(k)**2
+                G_c(k) = G_c(k)/M2 + G_n(k)/L2
+                N2 = N2 + G_c(k)**2
             end do
             p_min_f(1:n) = p_min_b(1:n)
             p_min_b(1:n) = p_min_b(1:n) &
-                & - 2.d0 * G_n2(1:n) * dot_product(G_n2(1:n), p_min_b(1:n)) / N2
+                & - 2.d0 * G_c(1:n) * dot_product(G_c(1:n), p_min_b(1:n)) / N2
         end if
         X_pls(1:n) = X_min(1:n)
         X_n(1:n) = X_min(1:n)
@@ -398,10 +398,10 @@ if (j.eq.0) then
         X_pls(1:n) = X_pls(1:n) + p_pls_f(1:n) * epsilon
         ! calculate potential / constraint
         call pot(X_pls, E_n, G_n, n)
-        call constraint(X_pls, E_n2, G_n2, n)
+        call constraint(X_pls, E_c, G_c, n)
         ! check whether point is inside contour
         Eaccept = Ecut.ge.E_n
-        Caccept = 0.d0.ge.E_n2
+        Caccept = 0.d0.ge.E_c
         ! reflect (or not)
         if (Eaccept.and.Caccept) then
             accept = .TRUE.
@@ -410,11 +410,11 @@ if (j.eq.0) then
             accept = .FALSE.
             L2 = 0.d0
             do k=1,n
-                L2 = L2 + G_n2(k)**2
+                L2 = L2 + G_c(k)**2
             end do
             p_pls_b(1:n) = p_pls_f(1:n)
             p_pls_f(1:n) = p_pls_f(1:n) &
-                & - 2.d0 * G_n2(1:n) * dot_product(G_n2(1:n), p_pls_f(1:n)) / L2
+                & - 2.d0 * G_c(1:n) * dot_product(G_c(1:n), p_pls_f(1:n)) / L2
         else if(Caccept.and.(.not.Eaccept)) then
             ! reflect off gradient
             accept = .FALSE.
@@ -432,18 +432,18 @@ if (j.eq.0) then
             M2 = 0.d0
             do k=1,n
                 L2 = L2 + G_n(k)**2
-                M2 = M2 + G_n2(k)**2
+                M2 = M2 + G_c(k)**2
             end do
             L2 = sqrt(L2)
             M2 = sqrt(M2)
             N2 = 0.d0
             do k=1,n
-                G_n2(k) = G_n2(k)/M2 + G_n(k)/L2
-                N2 = N2 + G_n2(k)**2
+                G_c(k) = G_c(k)/M2 + G_n(k)/L2
+                N2 = N2 + G_c(k)**2
             end do
             p_pls_b(1:n) = p_pls_f(1:n)
             p_pls_f(1:n) = p_pls_f(1:n) &
-                & - 2.d0 * G_n2(1:n) * dot_product(G_n2(1:n), p_pls_f(1:n)) / N2
+                & - 2.d0 * G_c(1:n) * dot_product(G_c(1:n), p_pls_f(1:n)) / N2
         end if
         X_min(1:n) = X_pls(1:n)
         X_n(1:n) = X_pls(1:n)
