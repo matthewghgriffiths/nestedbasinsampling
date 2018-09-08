@@ -38,6 +38,7 @@ class RemoteWorker(BasePyro):
         self.max_threads = max_threads
         self.manager_name = manager_name
         self._remote_manager = None
+        self.lock = threading.Lock()
 
     @property
     def remote_manager(self):
@@ -47,7 +48,10 @@ class RemoteWorker(BasePyro):
                     ns.lookup(self.manager_name))
         return self._remote_manager
 
+    # As worker job may not be threadsafe, ensure that only one thread
+    # can call this at anyone time
     @Pyro4.oneway
+    @utils.synchronous('lock')
     def request_job(self):
         try:
             job_id, job = self.remote_manager.get_job(self.name)

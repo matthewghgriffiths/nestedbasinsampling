@@ -4,6 +4,8 @@ This module contains various utility functions for the concurrent modules.
 """
 import random
 import logging
+import threading
+from functools import wraps
 from future.utils import iteritems
 
 
@@ -175,3 +177,28 @@ def parse_args(args=None):
     options, args = parser.parse_args(args)
     if options.host is None: options.host = gethostname()
     return options, args
+
+
+def synchronous(tlockname):
+    """
+    A decorator to place an instance-based lock around a method.
+    Adapted from http://code.activestate.com/recipes/577105-synchronization-decorator-for-class-methods/
+    """
+    def _synched(func):
+        @wraps(func)
+        def _synchronizer(self, *args, **kwargs):
+            tlock = getattr(self, tlockname)
+            logger.debug(
+                "acquiring lock %r for %s" % (tlockname, func.__name__))
+
+            # use lock as a context manager to perform safe acquire/release pairs
+            with tlock:
+                logger.debug(
+                    "acquired lock %r for %s" % (tlockname, func.__name__))
+                result = func(self, *args, **kwargs)
+                logger.debug(
+                    "releasing lock %r for %s" % (tlockname, func.__name__))
+                return result
+
+        return _synchronizer
+    return _synched
