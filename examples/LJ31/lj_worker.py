@@ -26,6 +26,7 @@ def main():
     worker = NBS_worker(natoms=31, stepsize=0.1)
     remote_worker = RemoteWorker(
         worker, nameserver_kw=nameserver_kw, daemon_kw=daemon_kw)
+    np.random.seed()
     remote_worker.main()
 
 if __name__ == '__main__':

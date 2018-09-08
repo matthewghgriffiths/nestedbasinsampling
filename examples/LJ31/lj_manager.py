@@ -3,7 +3,7 @@ import numpy as np
 import logging, sys
 
 from system import NBS_LJ
-from nestedbasinsampling import LOG_CONFIG, Database, Replica, Result
+from nestedbasinsampling import LOG_CONFIG, Database, Replica, Result, Run
 from nestedbasinsampling.concurrent import RemoteManager, BaseManager, utils
 
 logger = logging.getLogger('nbs.lj_manager')
@@ -23,12 +23,14 @@ class NBS_Manager(BaseManager):
         self.results = []
 
         replicas = self.database.session.query(Replica).\
-            order_by(Replica.energy).limit(1).all()
+            order_by(Replica.energy.desc()).limit(1).all()
         if replicas:
             self.g_replica, = replicas
         else:
             self.g_replica = self.database.addReplica(
                 np.inf, None, stepsize=self.nbs_system.stepsize)
+
+        print self.g_replica.energy
 
         nfev = self.database.get_property('nfev')
         if nfev is None:
@@ -79,7 +81,9 @@ class NBS_Manager(BaseManager):
         self.receive_funcs[job_name](work)
 
     def stop_criterion(self):
-        return self.curr_iter > self.max_iter
+        nruns = self.database.session.query(Run).count()
+        logger.info("database has {:d} runs".format(nruns))
+        return nruns > self.max_iter
 
 
 def main():
@@ -99,7 +103,7 @@ def main():
         logger.info("connecting to database: %s" % database)
         database = system.get_database(database)
 
-    manager = NBS_Manager(system, database=database, max_iter=5)
+    manager = NBS_Manager(system, database=database, max_iter=niter)
     remote_manager = RemoteManager(
         manager, nameserver_kw=nameserver_kw, daemon_kw=daemon_kw)
     remote_manager.main()
