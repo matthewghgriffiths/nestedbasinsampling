@@ -36,7 +36,7 @@ r2cut = radius**2
 e = 0.d0
 grad(:) = 0.d0
 do j=1,3*natoms-2,3
-    r2 = coords(j)**2 + coords(j+1)**2 + coords(j+2)**2
+    r2 = dot_product(coords(j:j+2),coords(j:j+2)) 
     if (r2 > r2cut) then
         e = e + (r2 - r2cut)/2
         grad(j:j+2) = coords(j:j+2)

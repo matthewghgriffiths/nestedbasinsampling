@@ -2,8 +2,6 @@ module noguts
 
 integer(kind=4), save :: seed=1
 logical, save :: remove_linear_momentum=.FALSE., remove_angular_momentum=.FALSE.
-
-
 contains
 
 function r_uniform() result(rand)
@@ -85,6 +83,7 @@ function r_uniform() result(rand)
 
   integer ( kind = 8 ) k
   real ( kind = 8 ) rand
+!  integer ( kind = 4 ) seed
 
   k = seed / 127773
 
@@ -139,6 +138,8 @@ function r_normal ()
   real ( kind = 8 ) r2
   real ( kind = 8 ) r_normal
   real ( kind = 8 ), parameter :: r8_pi = 3.141592653589793D+00
+ ! real ( kind = 8 ) r8_uniform_01
+ ! integer ( kind = 4 ) seed
 
   r1 = r_uniform ()
   r2 = r_uniform ()
@@ -160,7 +161,7 @@ do i=1,n
     random_normal_vec(i) = r_normal()
 end do
 
-end function
+end
 
 function random_unitvec(n)
 
@@ -302,6 +303,26 @@ end if
 
 end subroutine
 
+recursive subroutine test_pot(X, E, G, pot, j, n)
+implicit None
+
+integer, intent(in) :: n, j
+double precision, intent(in) :: X(n)
+double precision, intent(out) :: E, G(n)
+
+external pot
+!f2py intent(in), depend(n) :: X
+!f2py intent(hide) :: n
+!f2py intent(out) :: E
+!f2py intent(out), depend(n) :: G
+
+double precision E2
+
+if (j.gt.0) call test_pot(X, E2, G, pot, j - 1, n)
+call pot(X, E, G, n)
+E = E + E2
+
+end subroutine
 
 recursive subroutine build_tree( &
     & X_pls, p_pls_f, p_pls_b, X_min, p_min_f, p_min_b, X_n, E_n, G_n, &
@@ -329,7 +350,7 @@ external constraint
 !f2py intent(out), depend(n) :: G_n2
 
 logical accept, valid2, Eaccept, Caccept
-double precision X_n2(n), E_n2, G_n2(n), E_c, G_c(n), prob_new, L2, M2, N2
+double precision X_n2(n), E_n2, G_n2(n), prob_new, L2, M2, N2
 double precision X_dummy(n), p_dummy_f(n), p_dummy_b(n)
 integer naccept2, nreject2, tot_accept2, tot_reject2, k
 
@@ -342,10 +363,10 @@ if (j.eq.0) then
         X_min(1:n) = X_min(1:n) - p_min_b(1:n) * epsilon
         ! calculate potential and constraint
         call pot(X_min, E_n, G_n, n)
-        call constraint(X_min, E_c, G_c, n)
+        call constraint(X_min, E_n2, G_n2, n)
         ! reflect off potential/constraint if new point not within contour
         Eaccept = Ecut.ge.E_n
-        Caccept = 0.d0.ge.E_c
+        Caccept = 0.d0.ge.E_n2
         if (Eaccept.and.Caccept) then
             ! do nothing
             accept = .TRUE.
@@ -354,11 +375,11 @@ if (j.eq.0) then
             accept = .FALSE.
             L2 = 0.d0
             do k=1,n
-                L2 = L2 + G_c(k)**2
+                L2 = L2 + G_n2(k)**2
             end do
             p_min_f(1:n) = p_min_b(1:n)
             p_min_b(1:n) = p_min_b(1:n) &
-                & - 2.d0 * G_c(1:n) * dot_product(G_c(1:n), p_min_b(1:n)) / L2
+                & - 2.d0 * G_n2(1:n) * dot_product(G_n2(1:n), p_min_b(1:n)) / L2
         else if(Caccept.and.(.not.Eaccept)) then
             ! reflect off gradient
             accept = .FALSE.
@@ -375,18 +396,18 @@ if (j.eq.0) then
             M2 = 0.d0
             do k=1,n
                 L2 = L2 + G_n(k)**2
-                M2 = M2 + G_c(k)**2
+                M2 = M2 + G_n2(k)**2
             end do
             L2 = sqrt(L2)
             M2 = sqrt(M2)
             N2 = 0.d0
             do k=1,n
-                G_c(k) = G_c(k)/M2 + G_n(k)/L2
-                N2 = N2 + G_c(k)**2
+                G_n2(k) = G_n2(k)/M2 + G_n(k)/L2
+                N2 = N2 + G_n2(k)**2
             end do
             p_min_f(1:n) = p_min_b(1:n)
             p_min_b(1:n) = p_min_b(1:n) &
-                & - 2.d0 * G_c(1:n) * dot_product(G_c(1:n), p_min_b(1:n)) / N2
+                & - 2.d0 * G_n2(1:n) * dot_product(G_n2(1:n), p_min_b(1:n)) / N2
         end if
         X_pls(1:n) = X_min(1:n)
         X_n(1:n) = X_min(1:n)
@@ -398,10 +419,10 @@ if (j.eq.0) then
         X_pls(1:n) = X_pls(1:n) + p_pls_f(1:n) * epsilon
         ! calculate potential / constraint
         call pot(X_pls, E_n, G_n, n)
-        call constraint(X_pls, E_c, G_c, n)
+        call constraint(X_pls, E_n2, G_n2, n)
         ! check whether point is inside contour
         Eaccept = Ecut.ge.E_n
-        Caccept = 0.d0.ge.E_c
+        Caccept = 0.d0.ge.E_n2
         ! reflect (or not)
         if (Eaccept.and.Caccept) then
             accept = .TRUE.
@@ -410,11 +431,11 @@ if (j.eq.0) then
             accept = .FALSE.
             L2 = 0.d0
             do k=1,n
-                L2 = L2 + G_c(k)**2
+                L2 = L2 + G_n2(k)**2
             end do
             p_pls_b(1:n) = p_pls_f(1:n)
             p_pls_f(1:n) = p_pls_f(1:n) &
-                & - 2.d0 * G_c(1:n) * dot_product(G_c(1:n), p_pls_f(1:n)) / L2
+                & - 2.d0 * G_n2(1:n) * dot_product(G_n2(1:n), p_pls_f(1:n)) / L2
         else if(Caccept.and.(.not.Eaccept)) then
             ! reflect off gradient
             accept = .FALSE.
@@ -432,18 +453,18 @@ if (j.eq.0) then
             M2 = 0.d0
             do k=1,n
                 L2 = L2 + G_n(k)**2
-                M2 = M2 + G_c(k)**2
+                M2 = M2 + G_n2(k)**2
             end do
             L2 = sqrt(L2)
             M2 = sqrt(M2)
             N2 = 0.d0
             do k=1,n
-                G_c(k) = G_c(k)/M2 + G_n(k)/L2
-                N2 = N2 + G_c(k)**2
+                G_n2(k) = G_n2(k)/M2 + G_n(k)/L2
+                N2 = N2 + G_n2(k)**2
             end do
             p_pls_b(1:n) = p_pls_f(1:n)
             p_pls_f(1:n) = p_pls_f(1:n) &
-                & - 2.d0 * G_c(1:n) * dot_product(G_c(1:n), p_pls_f(1:n)) / N2
+                & - 2.d0 * G_n2(1:n) * dot_product(G_n2(1:n), p_pls_f(1:n)) / N2
         end if
         X_min(1:n) = X_pls(1:n)
         X_n(1:n) = X_pls(1:n)
@@ -505,11 +526,11 @@ end if
 
 end subroutine
 
-pure function stop_criterion(X_pls, p_pls_f, X_min, p_min_b, n) result(criterion)
+function stop_criterion(X_pls, p_pls_f, X_min, p_min_b, n) result(criterion)
 implicit none
 
-integer, intent(in) :: n
-double precision, intent(in) :: X_pls(n), p_pls_f(n), X_min(n), p_min_b(n)
+integer n
+double precision X_pls(n), p_pls_f(n), X_min(n), p_min_b(n)
 logical criterion
 
 integer j
@@ -563,13 +584,12 @@ end if
 
 end function
 
-pure function zero_angular_momentum(coords, p, n) result(new_p)
+function zero_angular_momentum(coords, p, n) result(new_p)
 implicit none
 
-integer, intent(in) :: n
-double precision, intent(in) :: coords(n), p(n)
+integer n
+double precision coords(n), p(n), new_p(n)
 
-double precision new_p(n)
 integer j
 double precision I(3,3), omega(3), R0(3), L(3)
 double precision X, Y, Z, X2, XY, ZX, Y2, YZ, Z2
@@ -612,21 +632,20 @@ end do
 
 end function
 
-pure function cross(a, b)
+function cross(a, b)
 implicit none
 double precision cross(3)
-double precision, intent(in) ::  a(3), b(3)
+double precision  a(3), b(3)
 
 cross(1) = a(2) * b(3) - a(3) * b(2)
 cross(2) = a(3) * b(1) - a(1) * b(3)
 cross(3) = a(1) * b(2) - a(2) * b(1)
 end function
 
-pure function matinv3(A) result(B)
+function matinv3(A) result(B)
   implicit none
   !! Performs a direct calculation of the inverse of a 3×3 matrix.
-  double precision, intent(in) :: A(3,3)
-  double precision detinv, B(3,3)
+  double precision A(3,3), B(3,3), detinv
 
   ! Calculate the inverse determinant of the matrix
   detinv = 1/(A(1,1)*A(2,2)*A(3,3) - A(1,1)*A(2,3)*A(3,2)&
