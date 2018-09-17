@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, **LOG_CONFIG)
 
 
 system = get_system()
-db = system.get_database('gaussian3.sqlite')
+db = system.get_database('gaussian.sqlite')
 replicas = db.session.query(Replica).\
     order_by(Replica.energy.desc()).limit(1).all()
 if replicas:

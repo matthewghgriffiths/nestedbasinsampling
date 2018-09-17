@@ -60,12 +60,12 @@ def random_coords(E):
     x = vector_random_uniform_hypersphere(k) * E**0.5
     return vp.dot(up2 * x)
 
-Ecut = 1.
+Ecut = 1000.
 stepsize = 0.1
 random_config = lambda : random_coords(Ecut)
 system_kws = dict(
     pot=pot, random_configuration=random_config, stepsize=stepsize,
-    sampler_kws=dict(max_depth=7, nsteps=30), nopt_kws=dict(iprint=10))
+    sampler_kws=dict(max_depth=None, nsteps=10), nopt_kws=dict(iprint=10))
 get_system = lambda : NBS_system(**system_kws)
 
 if __name__ == '__main__':
@@ -77,6 +77,8 @@ if __name__ == '__main__':
     nuts = system.sampler
     plt.ion()
 
+
+    Ecut=10000.
     k = 87
     epsilon = 0.02
     nsamples = 1000
@@ -85,18 +87,17 @@ if __name__ == '__main__':
     l = np.log(a) - np.log(a+b)
     l2 = l + np.log(a+1) - np.log(a+b+1)
     lstd = np.log1p(np.sqrt(np.exp(l2 - 2 * l) - 1))
-    Es = np.array([pot.getEnergy(random_coords(Ecut)) for i in range(nsamples)])
 
     coords = random_coords(Ecut)
-
     nuts_results = []
     for i in tqdm(xrange(nsamples)):
         nuts_results.append(nuts(Ecut, coords, stepsize=epsilon))
 
     nEs = np.array([r.energies for r in nuts_results])
     nEs.sort(0)
-    for i in xrange(4,nEs.shape[1],5):
+    for i in xrange(4, nEs.shape[1],5):
         Es = nEs.T[i]
-        plt.plot(Es**(0.5*k), ((l - 0.5*k*np.log(Es))/lstd), label=i)
+        plt.plot(
+            Es**(0.5*k), ((l - 0.5*k*(np.log(Es)-np.log(Ecut)))/lstd), label=i)
     plt.legend()
     plt.show()

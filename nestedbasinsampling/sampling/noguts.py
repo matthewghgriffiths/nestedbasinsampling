@@ -376,13 +376,13 @@ class NoGUTSSampler(BaseSampler):
         res.niter = nsteps
         res.energies = []
 
-        newcoords = np.array(coords)
+        res.coords = np.array(coords)
 
         if self.testinitial:
-            Econ = self.constraint.getEnergy(newcoords)
+            Econ = self.constraint.getEnergy(res.coords)
             if Econ > 0:
                 try:
-                    newcoords = self.fixConstraint(newcoords)
+                    res.coords = self.fixConstraint(res.coords)
                 except NotImplementedError:
                     raise SamplingError(
                         "Starting configuration doesn't satisfy constraint",
@@ -393,9 +393,9 @@ class NoGUTSSampler(BaseSampler):
         i = 0
         while i < nsteps:
             newres = self.nuts_step(
-                newcoords, Ecut, epsilon=stepsize, energy=E, grad=G)
+                res.coords, Ecut, epsilon=stepsize, energy=E, grad=G)
             if newres.naccept:
-                newcoords = newres.coords
+                res.coords = newres.coords
                 E = newres.energy
                 G = newres.grad
                 res.naccept += newres.naccept
@@ -407,7 +407,6 @@ class NoGUTSSampler(BaseSampler):
                 res.energies.append(E)
                 i += 1
 
-        res.coords = newres.coords
         res.energy = newres.energy
         res.grad = newres.grad
 

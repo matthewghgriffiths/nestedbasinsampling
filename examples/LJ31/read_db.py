@@ -42,13 +42,13 @@ def calcCv(lZ, lE1, lE2, Ts, Emin=0.):
 
 Ts = np.linspace(0.05,0.6,100)
 
-def calc_CV(Es, log_vol, Ts):    
+def calc_CV(Es, log_vol, Ts):
     logZ, logE1, logE2, Emin = calc_thermodynamics(Es, log_vol, Ts)
     return calcCv(logZ, logE1, logE2, Ts, Emin)
 
 
 
-db = Database('lj31.sqlite')
+db = Database('lj31_19.sqlite')
 
 k = 31*3 - 6
 
@@ -61,8 +61,28 @@ min_split = set(m for m, c in mins[-1:])
 m_replicas = set(p.parent for p in paths if p.child in min_split)
 o_replicas = set(p.parent for p in paths if p.child not in min_split)
 
-#m_run = combineAllRuns([r for r in runs if r.child in m_replicas])
-#o_run = combineAllRuns([r for r in runs if r.child in o_replicas])
+m_run = combineAllRuns([r for r in runs if r.child in m_replicas])
+mres = calc_CV(m_run.Emax, m_run.log_frac, Ts)
+plt.plot(Ts, mres.Cv)
+
+o_run = combineAllRuns([r for r in runs if r.child in o_replicas])
+ores = calc_CV(o_run.Emax, o_run.log_frac, Ts)
+plt.plot(Ts, ores.Cv)
+
+grun = combineAllRuns([m_run, o_run])
+gres = calc_CV(grun.Emax, grun.log_frac, Ts)
+plt.plot(Ts, gres.Cv)
+
+import random
+runs = db.runs()
+for i in xrange(10):
+    random.shuffle(runs)
+    r = combineAllRuns(runs[:5000])
+    res = calc_CV(r.Emax, r.log_frac, Ts)
+    plt.plot(Ts, res.Cv)
+
+
+raise Exception
 
 def get_min_run(m):
     replicas = [p.parent for p in paths if p.child == m]
