@@ -23,6 +23,16 @@ class BaseWorker(object):
         method, args, kwargs = job
         return job, getattr(self, method)(*args, **kwargs)
 
+    @classmethod
+    def from_system(cls, system):
+        def call_system(job):
+            method, args, kwargs = job
+            return job, getattr(system, method)(*args, **kwargs)
+        system.__call__ = call_system
+        return system
+
+
+
 @Pyro4.expose
 class RemoteWorker(BasePyro):
     def __init__(self, worker=None, max_threads=2,

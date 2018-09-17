@@ -28,7 +28,7 @@ def _calc_scale(pos1):
 
 class CompareStructures(object):
     def __init__(self, perm=None, boxvec=None, natoms=None, tol=1e-2,
-                 **align_kw):
+                 fix_orientation=False, **align_kw):
         self.perm = perm
         self.boxvec = boxvec
         self.tol = tol
@@ -37,8 +37,13 @@ class CompareStructures(object):
                 self.natoms = 1
             else:
                 self.natoms = sum(map(len, self.perm))
-        self.align = (self.align_cluster if boxvec is None else
-                      self.align_periodic)
+                
+        if fix_orientation:
+            self.align = lambda x, y, **kwargs: np.linalg.norm(x-y),
+        elif boxvec is None:
+            self.align = self.align_cluster
+        else:
+            self.align = self.align_periodic
         self.align_kw = align_kw
 
     def align_cluster(self, min1, min2, **kwargs):

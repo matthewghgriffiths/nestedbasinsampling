@@ -3,5 +3,5 @@
 __all__ = ['clustering', 'combine', 'integration']
 
 #from .clustering import *
-#from .combine import combineAllRuns, findRunSplit
+from .combine import combineAllRuns
 from .integration import *

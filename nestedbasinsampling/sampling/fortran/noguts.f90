@@ -303,27 +303,6 @@ end if
 
 end subroutine
 
-recursive subroutine test_pot(X, E, G, pot, j, n)
-implicit None
-
-integer, intent(in) :: n, j
-double precision, intent(in) :: X(n)
-double precision, intent(out) :: E, G(n)
-
-external pot
-!f2py intent(in), depend(n) :: X
-!f2py intent(hide) :: n
-!f2py intent(out) :: E
-!f2py intent(out), depend(n) :: G
-
-double precision E2
-
-if (j.gt.0) call test_pot(X, E2, G, pot, j - 1, n)
-call pot(X, E, G, n)
-E = E + E2
-
-end subroutine
-
 recursive subroutine build_tree( &
     & X_pls, p_pls_f, p_pls_b, X_min, p_min_f, p_min_b, X_n, E_n, G_n, &
     & v, j, Ecut, epsilon, naccept, nreject, tot_accept, tot_reject, &

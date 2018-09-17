@@ -9,7 +9,7 @@ from pele.optimize import lbfgs_cpp
 from pele.mindist import findrotation
 
 from ..structure import BaseConstraint
-from ..utils import Result, LinearKalmanFilter
+from ..utils import Result, LinearKalmanFilter, SamplingError
 from .galilean import BaseSampler
 from .takestep import random_step
 
@@ -252,7 +252,8 @@ class NoGUTSSampler(BaseSampler):
         return (X_m, p_m, EG_m, X_p, p_p, EG_p, X_n, p_n, EG_n,
                 naccept, nreject, tot_accept, tot_reject, valid)
 
-    def nuts_step(self, coords, Ecut, epsilon=1., energy=None, grad=None):
+    def nuts_step(self, coords, Ecut, epsilon=1., energy=None, grad=None,
+                  _depth=0):
         """
         """
 
@@ -339,9 +340,17 @@ class NoGUTSSampler(BaseSampler):
                 break
 
         if res.naccept == 0:
-            res = self.nuts_step(
-                coords, Ecut, epsilon=epsilon, energy=energy, grad=grad)
-            res.depth += 1
+            _depth += 1
+            if _depth < 50:
+                res = self.nuts_step(
+                    coords, Ecut, epsilon=epsilon, energy=energy, grad=grad,
+                    _depth=_depth)
+                res.depth = _depth
+            else:
+                raise SamplingError((
+                    "Max recursion of nuts_step, try decreasing stepsize"
+                    "current stepsize={:6.3g}, current energy={:10.5g}".format(
+                        epsilon, Ecut)))
 
         res.tot_accept = tot_accept
         res.tot_reject = tot_reject
@@ -384,7 +393,7 @@ class NoGUTSSampler(BaseSampler):
         i = 0
         while i < nsteps:
             newres = self.nuts_step(
-                coords, Ecut, epsilon=stepsize, energy=E, grad=G)
+                newcoords, Ecut, epsilon=stepsize, energy=E, grad=G)
             if newres.naccept:
                 newcoords = newres.coords
                 E = newres.energy

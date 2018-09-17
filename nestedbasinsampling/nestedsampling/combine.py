@@ -4,7 +4,7 @@ from itertools import izip, izip_longest, repeat, chain
 import numpy as np
 
 try:
-    from nestedbasinsampling.nestedsampling.fortran import combine
+    from .fortran import combine
     has_fortran = True
 except ImportError:
     has_fortran = False
@@ -145,7 +145,7 @@ def py_combineAllRuns_old(runs, parent=None, child=None):
     newRun = Run(Emaxnew, nlivenew, parent, child,
                  stored=storednew, configs=configsnew, stepsizes=stepsizesnew)
     return newRun
-    
+
 def py_combineAllRuns(runs, parent=None, child=None):
     """
     """
@@ -155,7 +155,7 @@ def py_combineAllRuns(runs, parent=None, child=None):
     if child is None:
         child = min(
             (run.child for run in runs), key=lambda r: r.energy)
-            
+
     _runs = [
         r.split(parent.energy, child.energy)
         if parent.energy < r.parent.energy else
@@ -167,7 +167,7 @@ def py_combineAllRuns(runs, parent=None, child=None):
     runvalues = chain(*(
         izip(Es, chain([False], repeat(True)), diff)
         for Es, diff in izip(runEs, runndiff)))
-        
+
     combined = np.array(sorted(runvalues, reverse=True))
     Es, flags, diffs = combined.T
 
@@ -175,7 +175,7 @@ def py_combineAllRuns(runs, parent=None, child=None):
     keep = flags.nonzero()[0]
     Esnew = Es[keep]
     nlivenew = nlive[keep-1]
-    
+
     return Run(Esnew, nlivenew, parent, child)
 
 def f90_combineAllRuns(runs, parent=None, child=None):
@@ -240,16 +240,16 @@ if has_fortran:
         mergeruns = runs
         while len(mergeruns) > 1:
             splitruns = (
-                (r for r in batch if r is not None) 
+                (r for r in batch if r is not None)
                 for batch in izip_longest(*[iter(mergeruns)]*nbatch))
-            mergeruns = [f90_combineAllRuns(batch, parent, child) 
+            mergeruns = [f90_combineAllRuns(batch, parent, child)
                          for batch in splitruns]
         run, = mergeruns
         return run
 else:
     combineAllRuns = py_combineAllRuns
 
-from nestedbasinsampling.storage import Run
+from ..storage.database import Run
 
 
 
@@ -276,14 +276,3 @@ if __name__ == "__main__":
     runs = [run1, run2]
     py_run = py_combineAllRuns(runs)
     f90_run = f90_combineAllRuns(runs)
-
-
-
-
-
-
-
-
-
-
-
