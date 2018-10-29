@@ -167,7 +167,7 @@ def parse_args(args=None):
         help="port to bind server on (0=random)")
     parser.add_option(
         "-i", "--niter", dest='niter', help="number of iterations to run",
-        default=1000)
+        default=1000, type='int')
     parser.add_option(
         "-d", "--database", dest='database', help='location of database file')
     parser.add_option(
