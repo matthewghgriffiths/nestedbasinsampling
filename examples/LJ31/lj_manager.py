@@ -17,7 +17,7 @@ class NBS_Manager(BaseManager):
             database = self.nbs_system.get_database()
         self.database = database
 
-        self.max_iter = max_iter
+        self.max_iter = int(max_iter)
         self.curr_iter = 0
 
         self.results = []

@@ -48,11 +48,15 @@ def calc_CV(Es, log_vol, Ts):
 
 
 
-db = Database('lj31_19.sqlite')
+db = Database('lj31_16.sqlite')
+
+print "\n".join("{:s}:\n{:s}".format(p.name, str(p.value)) for p in db.properties())
+print len(db.runs())
+
 
 k = 31*3 - 6
 
-runs = db.runs()
+runs = [r for r in db.runs() if len(r.Emax) > 100]
 paths = db.paths()
 m_count = Counter(p.child for p in paths)
 mins = sorted(m_count.items(), key=lambda x:x[1])
@@ -73,6 +77,9 @@ grun = combineAllRuns([m_run, o_run])
 gres = calc_CV(grun.Emax, grun.log_frac, Ts)
 plt.plot(Ts, gres.Cv)
 
+raise Exception
+
+
 import random
 runs = db.runs()
 for i in xrange(10):
@@ -82,7 +89,6 @@ for i in xrange(10):
     plt.plot(Ts, res.Cv)
 
 
-raise Exception
 
 def get_min_run(m):
     replicas = [p.parent for p in paths if p.child == m]
