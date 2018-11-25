@@ -49,7 +49,7 @@ def calc_CV(Es, log_vol, Ts):
 
 
 
-db = Database('lj31_16.sqlite')
+db = Database('lj31_21.sqlite')
 
 print "\n".join("{:s}:\n{:s}".format(p.name, str(p.value)) for p in db.properties())
 print len(db.runs())
@@ -68,15 +68,16 @@ o_replicas = set(p.parent for p in paths if p.child not in min_split)
 
 m_run = combineAllRuns([r for r in runs if r.child in m_replicas])
 mres = calc_CV(m_run.Emax, m_run.log_frac, Ts)
-plt.plot(Ts, mres.Cv)
+plt.plot(Ts, mres.Cv, label='min')
 
 o_run = combineAllRuns([r for r in runs if r.child in o_replicas])
 ores = calc_CV(o_run.Emax, o_run.log_frac, Ts)
-plt.plot(Ts, ores.Cv)
+plt.plot(Ts, ores.Cv, label='other')
 
 grun = combineAllRuns([m_run, o_run])
 gres = calc_CV(grun.Emax, grun.log_frac, Ts)
-plt.plot(Ts, gres.Cv)
+plt.plot(Ts, gres.Cv, label='all')
+plt.legend()
 
 <<<<<<< HEAD
 # import random

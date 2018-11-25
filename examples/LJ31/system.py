@@ -11,10 +11,11 @@ logger = logging.getLogger("NBS.LJ_system")
 
 
 default_sampler_kws = dict(
-    max_depth=8, remove_linear_momentum=True, remove_angular_momentum=True,
+    max_depth=7, remove_linear_momentum=True, remove_angular_momentum=True,
     remove_initial_linear_momentum=False, remove_initial_angular_momentum=False)
 default_nopt_kws = dict(
-    nsteps=2000, MC_steps=5, target_acc=0.4, nsave=20, tol=1e-2, nwait=10)
+    nsteps=2000, MC_steps=10, target_acc=0.4, nsave=30, tol=1e-2, 
+    nwait=15, kalman_discount=100.)
 default_struct_kws = dict(niter=100)
 default_database_kws = dict()
 
