@@ -21,24 +21,27 @@ class NBS_Manager(BaseManager):
         self.curr_iter = 0
 
         self.results = []
-
-        replicas = self.database.session.query(Replica).\
-            order_by(Replica.energy.desc()).limit(1).all()
-        if replicas:
-            self.g_replica, = replicas
-        else:
-            self.g_replica = self.database.addReplica(
-                np.inf, None, stepsize=self.nbs_system.stepsize)
-
-        print self.g_replica.energy
-
         nfev = self.database.get_property('nfev')
         if nfev is None:
             nfev = self.database.add_property('nfev', 0)
         self.nfev_property = nfev
 
         self.receive_funcs = dict(nopt=self.add_run)
-        if receive_funcs is not None: self.receive_funcs.update(receive_funcs)
+        if receive_funcs is not None:
+            self.receive_funcs.update(receive_funcs)
+
+    @property
+    def g_replica(self):
+        if self._g_replica is None:
+            replicas = self.database.session.query(Replica).\
+                order_by(Replica.energy.desc()).limit(1).all()
+            if replicas:
+                self._g_replica, = replicas
+            else:
+                self._g_replica = self.database.addReplica(
+                    np.inf, None, stepsize=self.nbs_system.stepsize)
+
+        return self._g_replica
 
     def get_job(self):
         logger.debug('creating job')

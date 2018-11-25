@@ -1,23 +1,22 @@
-
-#from __future__ import with_statement
-import os, sys, logging, time
+import sys
+import logging
 import threading
-import tempfile
 import Queue as queue
 
 import Pyro4
-from .base import BasePyro, LOG_CONFIG
+from .base import BasePyro
 from . import utils
 
 logger = logging.getLogger('nbs.concurrent.worker')
-SAVE_DEBUG = 0 # save intermediate models after every SAVE_DEBUG updates (0 for never)
-HUGE_TIMEOUT = 365 * 24 * 60 * 60 # one year
-
-
+HUGE_TIMEOUT = 365 * 24 * 60 * 60  # one year
 Pyro4.config.SERVERTYPE = "multiplex"
-sys.excepthook=Pyro4.util.excepthook
+sys.excepthook = Pyro4.util.excepthook
+
 
 class BaseWorker(object):
+
+    def initialise(self, *args, **kwargs):
+        pass
 
     def __call__(self, job):
         method, args, kwargs = job
@@ -30,7 +29,6 @@ class BaseWorker(object):
             return job, getattr(system, method)(*args, **kwargs)
         system.__call__ = call_system
         return system
-
 
 
 @Pyro4.expose
@@ -49,6 +47,7 @@ class RemoteWorker(BasePyro):
         self.manager_name = manager_name
         self._remote_manager = None
         self.lock = threading.Lock()
+        self.initialised = False
 
     @property
     def remote_manager(self):
@@ -58,26 +57,37 @@ class RemoteWorker(BasePyro):
                     ns.lookup(self.manager_name))
         return self._remote_manager
 
+    @Pyro4.oneway
+    def initialise(self, *args, **kwargs):
+        logger.info("initialising {:s}".format(self.name))
+        self.worker.initialise(*args, **kwargs)
+        self.initialised = True
+        self.request_job()
+
     # As worker job may not be threadsafe, ensure that only one thread
     # can call this at anyone time
     @Pyro4.oneway
     @utils.synchronous('lock')
     def request_job(self):
         try:
-            job_id, job = self.remote_manager.get_job(self.name)
-            logger.debug(
-                "successfully requested job #{:d}, starting:".format(job_id))
-            try:
-                work = self.worker(job)
+            if self.initialised:
+                job_id, job = self.remote_manager.get_job(self.name)
                 logger.debug(
-                    "successfully finished job, sending".format(job_id))
-                self.remote_manager.receive_output(self.name, job_id, work)
-                logger.debug(
-                    "%s sent work back to manager" % self.name)
-            except Exception as e:
-                logger.critical(
-                    "job #{:d} failed with error:".format(job_id))
-                logger.exception(e)
+                    "successfully requested job #{:d}, starting:".format(job_id))
+                try:
+                    work = self.worker(job)
+                    logger.debug(
+                        "successfully finished job, sending".format(job_id))
+                    self.remote_manager.receive_output(self.name, job_id, work)
+                    logger.debug(
+                        "%s sent work back to manager" % self.name)
+                except Exception as e:
+                    logger.critical(
+                        "job #{:d} failed with error:".format(job_id))
+                    logger.exception(e)
+            else:
+                self.remote_manager.connect(self.name)
+
         except queue.Empty:
             logger.debug("job queue empty")
         except Pyro4.errors.CommunicationError:

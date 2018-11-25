@@ -28,7 +28,7 @@ class BasePyro(object):
 
     def _unique_name(self, name, nameserver=None):
         if nameserver is None:
-            ns =  utils.getNS(**self.nameserver_kw)
+            ns = utils.getNS(**self.nameserver_kw)
         else:
             ns = nameserver
 

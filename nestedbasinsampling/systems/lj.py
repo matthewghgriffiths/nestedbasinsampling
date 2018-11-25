@@ -3,8 +3,8 @@ import logging
 from pele.potentials import LJ
 from ..structure import HardShellConstraint, CompareStructures
 from ..sampling import random_structure, NoGUTSSampler
-from ..utils import LOG_CONFIG
 from .nbs_system import NBS_system
+
 
 logger = logging.getLogger("NBS.LJ_system")
 
@@ -51,7 +51,9 @@ class NBS_LJ(NBS_system):
     def get_compare_structures(self):
         return CompareStructures(**self.struct_kws)
 
+
 if __name__ == '__main__':
+    from nestedbasinsampling import LOG_CONFIG
     logging.basicConfig(level=logging.DEBUG, **LOG_CONFIG)
     natoms = 31
     radius = 2.5
