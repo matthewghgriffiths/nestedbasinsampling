@@ -1,7 +1,8 @@
 
 import numpy as np
+import cPickle
 
-from nestedbasinsampling import Database
+from nestedbasinsampling import Database, Run
 from nestedbasinsampling.nestedsampling.combine import combineAllRuns
 from nestedbasinsampling.nestedsampling.integration import logsumexp, logtrapz
 from collections import Counter, namedtuple
@@ -40,7 +41,7 @@ def calcCv(lZ, lE1, lE2, Ts, Emin=0.):
     Ret = namedtuple("CvReturn", "lZ U U2 Cv")
     return Ret(lZ=lZ, U=U, U2=U2, Cv=Cv)
 
-Ts = np.linspace(0.05,0.6,100)
+Ts = np.linspace(0.01,0.6,1000)
 
 def calc_CV(Es, log_vol, Ts):
     logZ, logE1, logE2, Emin = calc_thermodynamics(Es, log_vol, Ts)
@@ -48,7 +49,7 @@ def calc_CV(Es, log_vol, Ts):
 
 
 
-db = Database('lj31_19.sqlite')
+db = Database('lj31_6.sqlite')
 
 k = 31*3 - 6
 
@@ -73,14 +74,16 @@ grun = combineAllRuns([m_run, o_run])
 gres = calc_CV(grun.Emax, grun.log_frac, Ts)
 plt.plot(Ts, gres.Cv)
 
-import random
-runs = db.runs()
-for i in xrange(10):
-    random.shuffle(runs)
-    r = combineAllRuns(runs[:5000])
-    res = calc_CV(r.Emax, r.log_frac, Ts)
-    plt.plot(Ts, res.Cv)
+# import random
+# runs = db.runs()
+# for i in xrange(10):
+#     random.shuffle(runs)
+#     r = combineAllRuns(runs[:5000])
+#     res = calc_CV(r.Emax, r.log_frac, Ts)
+#     plt.plot(Ts, res.Cv)
 
+with open("rephd/lj31_noguts.pkl", 'wb') as f:
+    cPickle.dump(gres._asdict(), f)
 
 raise Exception
 

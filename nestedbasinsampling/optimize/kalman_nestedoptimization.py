@@ -45,7 +45,8 @@ class NestedOptimizerKalman(object):
     def __init__(self, X, pot, sampler, stepsize=0.1, target_acc=0.4,
                  MC_steps=20, tol=1e-1, nsave=10, nwait=1,
                  kalman_discount=10., kalman_var=1.,
-                 alternate_stop_criterion=None,
+                 basin_optimization=False, basinE=None,
+                 alternate_stop_criterion=None, max_tries=0,
                  events=None, iprint=-1, nsteps=10000, debug=False,
                  target=None, use_quench=True,
                  energy=None, gradient=None, store_configs=False,
@@ -74,33 +75,45 @@ class NestedOptimizerKalman(object):
         self.iprint = iprint
         self.nsteps = nsteps
         self.MC_steps = MC_steps
-        self.nsave = nsave
+        self.max_tries = max_tries
         self.tol = tol
         self.target = target
 
         self.store_configs = True
 
+        self.basin_optimization = basin_optimization
         self.alternate_stop_criterion = alternate_stop_criterion
+        self.working = True
         self.debug = debug  # print debug messages
-
 
         self.rms = np.inf
         self.Ediff = np.inf
 
         self.iter_number = 0
+        self.n_tries = 0
         self.nopt = 0
         self.tot_rejects = 0
         self.tot_steps = 0
         self.naccept = defaultdict(int)
 
-
-        if energy is None:
-            self.E, self.G = self.pot.getEnergyGradient(self.X)
-            self.nfev = 1
+        self.nfev = 0
+        if self.basin_optimization:
+            if basinE is None:
+                self.basinE = self.pot.getEnergy(self.Xi)
+                self.nfev += 1
+            else:
+                self.basinE = basinE
+            self.E = np.inf if energy is None else energy
+            # The target energy must be higher than the basin energy.
+            if self.target is not None:
+                assert self.target > self.basinE
         else:
-            self.E = energy
-            self.G = gradient
-            self.nfev = 0
+            if energy is None:
+                self.E, self.G = self.pot.getEnergyGradient(self.X)
+                self.nfev += 1
+            else:
+                self.E = energy
+                self.G = gradient
 
         self.result = Result()
         self.result.naccept = 0
@@ -133,59 +146,77 @@ class NestedOptimizerKalman(object):
 
     def one_iteration(self):
         try:
+            X = self.Xi if self.basin_optimization else self.X
             res = self.sampler(
-                self.E, self.X, stepsize=self.stepsize, nsteps=self.MC_steps)
+                self.E, X, stepsize=self.stepsize, nsteps=self.MC_steps)
 
-            assert res.energy < self.E
-            self.last_results.append(res)
+            if res.energy < self.E:
+                self.last_results.append(res)
 
-            self.update_stepsize()
+                self.Xlast[:] = self.X
+                self.X[:] = res.coords
 
-            self.Xlast[:] = self.X
-            self.X[:] = res.coords
+                self.E = res.energy
+                self.G = (res.grad if hasattr(res, 'grad')
+                          else self.pot.getGradient(self.X))
+                self.rms = np.linalg.norm(self.G)/np.sqrt(self.X.size)
+                if len(self.last_results) == self.nsave:
+                    self.Ediff = (self.last_results[0].energy -
+                                  self.last_results[-1].energy)
+                else:
+                    self.Ediff = np.inf
 
-            self.E = res.energy
-            self.G = (res.grad if hasattr(res, 'grad')
-                      else self.pot.getGradient(self.X))
-            self.rms = np.linalg.norm(self.G)/np.sqrt(self.X.size)
-            if len(self.last_results) == self.nsave:
-                self.Ediff = (self.last_results[0].energy -
-                              self.last_results[-1].energy)
+                self.curr_accept = res.naccept
+                self.curr_reject = res.nreject
+                self.Emax.append(res.energy)
+                self.stepsizes.append(res.stepsize)
+                self.nfev += res.nfev
+
+                self.printState(False)
+
+                for event in self.events:
+                    event(coords=self.X, energy=self.E, res=res,
+                          rms=self.rms, stepsize=self.stepsize)
+
+                self.update_stepsize()
+                self.n_tries = 0
+                self.iter_number += 1
+            elif res.naccept == 0:
+                logger.warning((
+                    "no steps were accepted, E={:10.5}, stepsize={:10.5g}, "
+                    "halving stepsize").format(self.E, self.stepsize))
+                self.stepsize /= 2
+                self.n_tries += 1
+                if self.n_tries >= self.max_tries:
+                    raise SamplineError()
             else:
-                self.Ediff = np.inf
+                raise NestedSamplingError(
+                    "Energy of new replica greater than cutoff")
 
-            self.curr_accept = res.naccept
-            self.curr_reject = res.nreject
-            self.Emax.append(res.energy)
-            self.stepsizes.append(res.stepsize)
-            self.nfev += res.nfev
-
-            self.printState(False)
-
-            for event in self.events:
-                event(coords=self.X, energy=self.E, res=res,
-                      rms=self.rms, stepsize=self.stepsize)
-
-            self.iter_number += 1
-
-        except SamplingError:
-            if self.debug:
-                logger.error("Sampling error")
-            self.result.message.append('Sampling Error')
-
-            if self.use_quench:
-                quenchres = self.quench_config()
-                self.X = quenchres.coords
-                self.E = quenchres.energy
-                self.G = quenchres.grad
-                self.rms = quenchres.rms
-                self.nopt = self.iter_number
-                self.iter_number += quenchres.nsteps
-
+        except SamplingError as e:
+            if self.n_tries < self.max_tries:
+                logger.error("Sampling error{}".format(e.args))
+                logger.warning((
+                    "no steps were accepted, E={:10.5}, stepsize={:10.5g}, "
+                    "halving stepsize").format(self.E, self.stepsize))
+                self.n_tries += 1
+                self.stepsize /= 2
+            else:
+                self.result.message.append('Sampling Error')
+                if self.use_quench:
+                    quenchres = self.quench_config()
+                    self.X = quenchres.coords
+                    self.E = quenchres.energy
+                    self.G = quenchres.grad
+                    self.rms = quenchres.rms
+                    self.nopt = self.iter_number
+                    self.iter_number += quenchres.nsteps
+                self.working = False
 
     def printState(self, force=True):
         """logs the current state"""
-        cond = (self.iprint > 0 and self.iter_number%self.iprint == 0) or force
+        cond = (self.iprint > 0 and
+                self.iter_number % self.iprint == 0) or force
         if cond:
             logger.debug((
                 "niters={:4d}, Ecut={:10.5g}, rms={:10.5g}, "
@@ -193,20 +224,21 @@ class NestedOptimizerKalman(object):
                     self.iter_number, self.E, self.rms, self.stepsize,
                     self.curr_accept, self.curr_reject))
 
-
     def stop_criterion(self):
         """test the stop criterion"""
-        if self.alternate_stop_criterion is None:
-            if self.target is not None:
-                return ((self.E < self.target) or
-                        (self.rms < self.tol) or
-                        (self.Ediff < self.tol))
+        if self.working:
+            if self.alternate_stop_criterion is None:
+                if self.target is not None:
+                    return (self.E < self.target)
+                else:
+                    return (
+                        self.rms < self.tol or self.Ediff < self.tol)
             else:
-                return (self.rms < self.tol or self.Ediff < self.tol)
+                return self.alternate_stop_criterion(
+                    energy=self.E, gradient=self.G,
+                    tol=self.tol, coords=self.X)
         else:
-            return self.alternate_stop_criterion(energy=self.E,
-                                                 gradient=self.G,
-                                                 tol=self.tol, coords=self.X)
+            return True
 
     def run(self):
         logger.info(
@@ -218,7 +250,6 @@ class NestedOptimizerKalman(object):
             except NestedSamplingError:
                 self.result.message.append("problem with nested sampler")
                 break
-
 
         self.nopt = self.iter_number
         if self.use_quench:

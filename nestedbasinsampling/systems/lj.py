@@ -1,30 +1,62 @@
+import logging
 
 from pele.potentials import LJ
-from ..structure import HardShellConstraint
-from ..sampling import random_structure
+from ..structure import HardShellConstraint, CompareStructures
+from ..sampling import random_structure, NoGUTSSampler
+from ..utils import LOG_CONFIG
 from .nbs_system import NBS_system
 
-default_sampler_kws = dict(
-    max_depth=7, remove_linear_momentum=True, remove_angular_momentum=True,
-    remove_initial_linear_momentum=False, remove_initial_angular_momentum=False)
+logger = logging.getLogger("NBS.LJ_system")
 
-class LJ_system(NBS_system):
 
-    def __init__(self, natoms, radius=None,
-                 stepsize=None, sampler_kws=None, nopt_kws=None,
-                 stepsize_kw=None, struct_kws=None, database_kws=None):
+class NBS_LJ(NBS_system):
+    """
+    """
+    default_sampler_kws = dict(
+        max_depth=7, remove_linear_momentum=True, remove_angular_momentum=True,
+        remove_initial_linear_momentum=False,
+        remove_initial_angular_momentum=False)
+
+    def __init__(self, natoms, radius=None, stepsize=None,
+                 sampler_kws=None, nopt_kws=None, stepsize_kws=None,
+                 struct_kws=None, database_kws=None, _Sampler=NoGUTSSampler):
         self.natoms = natoms
-        if radius is None:
-            radius = float(natoms) ** (1. / 3)
-        self.radius = radius
         pot = LJ()
-        constraint = HardShellConstraint(radius)
-        random_config = lambda : random_structure(self.natoms, self.radius)
+        self.radius = float(natoms) ** (1. / 3) if radius is None else radius
+        constraint = HardShellConstraint(self.radius)
 
-        _sampler_kws = default_sampler_kws.copy()
-        if sampler_kws is not None: _sampler_kws.update(sampler_kws)
+        super(NBS_LJ, self).__init__(
+            pot, constraint=constraint, stepsize=stepsize,
+            sampler_kws=sampler_kws, nopt_kws=nopt_kws,
+            stepsize_kws=stepsize_kws,  struct_kws=struct_kws,
+            database_kws=database_kws, _Sampler=_Sampler)
 
-        super(LJ_system, self).__init__(
-            pot, random_config, constraint, database_kws=database_kws,
-            stepsize=stepsize, sampler_kws=_sampler_kws, nopt_kws=nopt_kws,
-            stepsize_kw=stepsize_kw, struct_kws=struct_kws)
+    def determine_stepsize(self, coords=None, E=None, **kwargs):
+        if coords is None:
+            coords = self.get_random_configuration()
+        if E is None:
+            E = self.pot.getEnergy(coords)
+        s = self.sampler.determine_stepsize(coords, E, **kwargs)
+        return s
+
+    def get_random_configuration(self):
+        return random_structure(self.natoms, self.radius)
+
+    def get_configuration(self):
+        coords = self.get_random_configuration()
+        Ecut = self.pot.getEnergy(coords)
+        stepsize = self.stepsize
+        return coords, Ecut, stepsize
+
+    def get_compare_structures(self):
+        return CompareStructures(**self.struct_kws)
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG, **LOG_CONFIG)
+    natoms = 31
+    radius = 2.5
+    nopt_kws = dict(
+        nsteps=2000, MC_steps=5, target_acc=0.4, nsave=10, tol=1e-2, iprint=1,
+        nwait=5, debug=True)
+    system = NBS_LJ(natoms, radius, nopt_kws=nopt_kws)
+    res = system.nopt()

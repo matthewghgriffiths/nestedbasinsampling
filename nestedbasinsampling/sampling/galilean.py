@@ -394,6 +394,11 @@ class py_GalileanSampler(BaseSampler):
         res.grad = newres.grad
         res.stepsize = stepsize
 
+        res.naccept = sum(a['naccept'] for a in res.accepts)
+        res.nreject = sum(a['nreject'] + a['nreflect'] for a in res.accepts)
+        res.nreflect = sum(a['nreflect'] for a in res.accepts)
+        res.nfev = res.naccept + res.nreject
+
         return res
 
     def new_point(self, Ecut, coords, nsteps=None, stepsize=None):

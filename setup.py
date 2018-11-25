@@ -3,7 +3,7 @@ import setuptools
 from numpy.distutils.core import setup
 from numpy.distutils.core import Extension
 
-extra_compile_args=['-Wall', '-Wextra', '-pedantic', '-funroll-loops', '-O2']
+extra_compile_args = ['-Wall', '-Wextra', '-pedantic', '-funroll-loops', '-O2']
 fortran_source_files = [
     'nestedbasinsampling/sampling/fortran/noguts.f90',
     'nestedbasinsampling/sampling/fortran/galilean.f90',

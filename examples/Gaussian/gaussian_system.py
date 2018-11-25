@@ -65,7 +65,7 @@ stepsize = 0.1
 random_config = lambda : random_coords(Ecut)
 system_kws = dict(
     pot=pot, random_configuration=random_config, stepsize=stepsize,
-    sampler_kws=dict(max_depth=None, nsteps=10), nopt_kws=dict(iprint=10))
+    sampler_kws=dict(max_depth=8, nsteps=30), nopt_kws=dict(iprint=10))
 get_system = lambda : NBS_system(**system_kws)
 
 if __name__ == '__main__':

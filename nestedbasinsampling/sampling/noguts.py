@@ -22,6 +22,7 @@ except ImportError:
 
 logger = logging.getLogger('NBS.NoGUTS')
 
+
 class NoGUTSSampler(BaseSampler):
     """
     """
@@ -348,7 +349,7 @@ class NoGUTSSampler(BaseSampler):
                 res.depth = _depth
             else:
                 raise SamplingError((
-                    "Max recursion of nuts_step, try decreasing stepsize"
+                    "Max recursion of nuts_step, try decreasing stepsize "
                     "current stepsize={:6.3g}, current energy={:10.5g}".format(
                         epsilon, Ecut)))
 

@@ -5,6 +5,7 @@ from nestedbasinsampling import (
     NoGUTSSampler, NestedOptimizerKalman, HardShellConstraint, random_structure,
     RecordMinimization, CompareStructures, LOG_CONFIG, Database)
 
+logger = logging.getLogger("LJ31.system")
 
 default_sampler_kws = dict(
     max_depth=7, remove_linear_momentum=True, remove_angular_momentum=True,
@@ -81,7 +82,12 @@ class NBS_LJ(object):
         return Database(db, **self.database_kws)
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, **LOG_CONFIG)
-    system = NBS_LJ(natoms=31, stepsize=0.1)
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG, **LOG_CONFIG)
+    natoms = 31
+    radius = 2.5
+    nopt_kws = dict(
+        nsteps=2000, MC_steps=5, target_acc=0.4, nsave=10, tol=1e-2, iprint=1,
+        nwait=5, debug=True)
+    system = NBS_LJ(natoms, radius, nopt_kws=nopt_kws)
     res = system.nopt()
