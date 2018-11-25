@@ -49,11 +49,15 @@ def calc_CV(Es, log_vol, Ts):
 
 
 
-db = Database('lj31_6.sqlite')
+db = Database('lj31_16.sqlite')
+
+print "\n".join("{:s}:\n{:s}".format(p.name, str(p.value)) for p in db.properties())
+print len(db.runs())
+
 
 k = 31*3 - 6
 
-runs = db.runs()
+runs = [r for r in db.runs() if len(r.Emax) > 100]
 paths = db.paths()
 m_count = Counter(p.child for p in paths)
 mins = sorted(m_count.items(), key=lambda x:x[1])
@@ -74,6 +78,7 @@ grun = combineAllRuns([m_run, o_run])
 gres = calc_CV(grun.Emax, grun.log_frac, Ts)
 plt.plot(Ts, gres.Cv)
 
+<<<<<<< HEAD
 # import random
 # runs = db.runs()
 # for i in xrange(10):
@@ -81,11 +86,22 @@ plt.plot(Ts, gres.Cv)
 #     r = combineAllRuns(runs[:5000])
 #     res = calc_CV(r.Emax, r.log_frac, Ts)
 #     plt.plot(Ts, res.Cv)
+=======
+raise Exception
+
+
+import random
+runs = db.runs()
+for i in xrange(10):
+    random.shuffle(runs)
+    r = combineAllRuns(runs[:5000])
+    res = calc_CV(r.Emax, r.log_frac, Ts)
+    plt.plot(Ts, res.Cv)
+>>>>>>> cb91866c58e64cfff9d8128ba4c6e30b7a42c972
 
 with open("rephd/lj31_noguts.pkl", 'wb') as f:
     cPickle.dump(gres._asdict(), f)
 
-raise Exception
 
 def get_min_run(m):
     replicas = [p.parent for p in paths if p.child == m]

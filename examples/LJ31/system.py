@@ -7,11 +7,14 @@ from nestedbasinsampling import (
 
 logger = logging.getLogger("LJ31.system")
 
+logger = logging.getLogger("NBS.LJ_system")
+
+
 default_sampler_kws = dict(
-    max_depth=7, remove_linear_momentum=True, remove_angular_momentum=True,
+    max_depth=8, remove_linear_momentum=True, remove_angular_momentum=True,
     remove_initial_linear_momentum=False, remove_initial_angular_momentum=False)
 default_nopt_kws = dict(
-    nsteps=2000, MC_steps=5, target_acc=0.4, nsave=10, tol=1e-2)
+    nsteps=2000, MC_steps=5, target_acc=0.4, nsave=20, tol=1e-2, nwait=10)
 default_struct_kws = dict(niter=100)
 default_database_kws = dict()
 
@@ -78,16 +81,18 @@ class NBS_LJ(object):
     def get_compare_structures(self):
         return CompareStructures(**self.struct_kws)
 
-    def get_database(self, db=":memory:"):
-        return Database(db, **self.database_kws)
+    def get_database(self, dbname=":memory:"):
+        db = Database(dbname, **self.database_kws)
+        db.add_property('sampler', self.sampler_kws, overwrite=False)
+        db.add_property('nopt', self.nopt_kws, overwrite=False)
+        db.add_property('struct', self.struct_kws, overwrite=False)
+        logger.info("Connecting to database: {:s}".format(dbname))
+        logger.info("params:\nsampler:\n{:s}\nnopt:\n{:s}".format(
+            str(self.sampler_kws), str(self.nopt_kws)))
+        return db
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, **LOG_CONFIG)
-    natoms = 31
-    radius = 2.5
-    nopt_kws = dict(
-        nsteps=2000, MC_steps=5, target_acc=0.4, nsave=10, tol=1e-2, iprint=1,
-        nwait=5, debug=True)
-    system = NBS_LJ(natoms, radius, nopt_kws=nopt_kws)
+    system = NBS_LJ(natoms=31, stepsize=0.1)
     res = system.nopt()
