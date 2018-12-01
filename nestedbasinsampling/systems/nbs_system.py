@@ -134,11 +134,11 @@ class NBS_system(object):
 
         class WorkerClass(cls, BaseWorker):
             pass
-            
+
         return WorkerClass
 
     def get_manager(self, db=":memory:", **kwargs):
-        database = self.get_database()
+        database = self.get_database(db=db)
         manager = NBS_Manager(self, database=database, **kwargs)
         return manager
 
