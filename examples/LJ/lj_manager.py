@@ -47,10 +47,12 @@ def main():
     niter = options.niter
     nameserver_kw = dict(host=options.nameserver, port=options.nsport)
     daemon_kw = dict(host=options.host, port=options.port)
+    manager_kws = dict(max_iter=niter, mins=options.mins)
+    if options.database is not None:
+        manager_kws['db'] = options.database
 
     system = NBS_LJ(**settings)
-    manager = system.get_manager(
-        options.database, max_iter=niter, mins=options.mins)
+    manager = system.get_manager(**manager_kws)
     remote_manager = RemoteManager(
         manager, pyro_name=options.manager, worker_name=options.worker,
         nameserver_kw=nameserver_kw, daemon_kw=daemon_kw)

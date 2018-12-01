@@ -59,7 +59,7 @@ class NBS_Manager(BaseManager):
         self.nfev_property = nfev
 
         self.jobs_left = {'nopt': max_iter}
-        self.basins = {'nopt': (None, self._g_replica)}  # for standard nopts
+        self.basins = {'nopt': (None, self.g_replica)}  # for standard nopts
 
         if basin_opts is not None:
             # for basin nopts
@@ -167,6 +167,7 @@ class NBS_Manager(BaseManager):
         self.nfev_property.value += res.nfev
 
         self.database.session.commit()
+
         if self.jobs_left[label]:
             self.jobs_left[label] -= 1
 
