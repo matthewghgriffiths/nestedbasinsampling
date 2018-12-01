@@ -65,7 +65,8 @@ class RemoteWorker(BasePyro):
             if self.initialised:
                 job_id, job = self.remote_manager.get_job(self.name)
                 logger.debug(
-                    "successfully requested job #{:d}, starting:".format(job_id))
+                    "successfully requested job #{:d}, starting:".format(
+                        job_id))
                 try:
                     work = self.worker(job)
                     logger.debug(

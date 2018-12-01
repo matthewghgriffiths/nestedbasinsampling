@@ -1,10 +1,9 @@
 
-import os, logging
+import os
+import logging
 from . import utils
 import Pyro4
-from Pyro4.util import SerializerBase, SerpentSerializer
-
-from ..utils import Result
+from Pyro4.util import SerializerBase
 
 logger = logging.getLogger('nbs.concurrent')
 SAVE_DEBUG = 0
@@ -12,6 +11,7 @@ LOG_CONFIG = utils.LOG_CONFIG
 
 __all__ = ['BasePyro', 'LOG_CONFIG']
 Pyro4.config.SERVERTYPE = "multiplex"
+
 
 @Pyro4.expose
 class BasePyro(object):
@@ -91,20 +91,19 @@ def _register_numpy_serializers():
 
     def int_to_dict(value):
         return dict(
-            __class__ = 'numpy.' + type(value).__name__,
-            value = int(value))
+            __class__='numpy.' + type(value).__name__,
+            value=int(value))
 
     def float_to_dict(value):
         return dict(
-            __class__ = 'numpy.' + type(value).__name__,
-            value = float(value))
+            __class__='numpy.' + type(value).__name__,
+            value=float(value))
 
     def ndarray_to_dict(array):
         return dict(
-            __class__ = 'numpy.ndarray',
-            data = array.tolist(),
-            dtype = array.dtype.str,
-        )
+            __class__='numpy.ndarray',
+            data=array.tolist(),
+            dtype=array.dtype.str)
 
     def dict_to_np(classname, d):
         return getattr(np, classname[6:])(d['value'])
@@ -123,24 +122,6 @@ def _register_numpy_serializers():
     SerializerBase.register_class_to_dict(np.ndarray, ndarray_to_dict)
     SerializerBase.register_dict_to_class('numpy.ndarray', dict_to_ndarray)
 
-def _register_result():
-    def result_to_dict(result):
-        #logger.debug("serialising {:s}".format(str(result)))
-        d = dict(result)
-        d['__class__'] = 'Result'
-        return d
-
-    def dict_to_result(classname, d):
-        d.pop('__class__')
-        for k, val in d.items():
-            if isinstance(val, dict) and '__class__' in val:
-                d[v] = serializer.dict_to_class(val)
-        res = Result(d)
-        #logger.debug("deserialised {:s}".format(res))
-        return res
-
-    SerializerBase.register_class_to_dict(Result, result_to_dict)
-    SerializerBase.register_dict_to_class('Result', dict_to_result)
 
 def _register_errors():
     try:
@@ -149,21 +130,22 @@ def _register_errors():
         import queue
 
     exceptions = [queue.Empty]
-    exceptions_names = dict((e, "".join((e.__module__,'.',e.__name__)))
-                        for e in exceptions)
+    exceptions_names = dict((e, "".join((e.__module__, '.', e.__name__)))
+                            for e in exceptions)
 
     def error_to_dict(error):
         return dict(__class__=exceptions_names[type(error)])
+
     def dict_to_error(classname, d):
         return queue.Empty
 
     for error in exceptions:
         SerializerBase.register_class_to_dict(error, error_to_dict)
-        SerializerBase.register_dict_to_class(exceptions_names[error], dict_to_error)
+        SerializerBase.register_dict_to_class(
+            exceptions_names[error], dict_to_error)
 
 
-
-# This ensures that the numpy arrays and queue exceptions can be serialized by Pyro
+"""This ensures that the numpy arrays and queue exceptions can be
+serialized by Pyro"""
 _register_numpy_serializers()
 _register_errors()
-_register_result()

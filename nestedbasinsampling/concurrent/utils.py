@@ -97,20 +97,21 @@ def get_my_ip():
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect((ns._pyroUri.host, ns._pyroUri.port))
         result, port = s.getsockname()
-    except:
+    except Exception:
         try:
             # see what ifconfig says about our default interface
             import commands
-            result = commands.getoutput("ifconfig").split("\n")[1].split()[1][5:]
+            result = commands.getoutput(
+                "ifconfig").split("\n")[1].split()[1][5:]
             if len(result.split('.')) != 4:
                 raise Exception()
-        except:
+        except Exception:
             # give up, leave the resolution to gethostbyname
             result = socket.gethostbyname(socket.gethostname())
     return result
 
 
-def threaded_eventloop(daemons, loopCondition=lambda :True):
+def threaded_eventloop(daemons, loopCondition=lambda: True):
     """
     Runs a threaded requestLoop for the Pyro daemons passed, whilst
     loopCondition returns true
@@ -139,6 +140,7 @@ def threaded_eventloop(daemons, loopCondition=lambda :True):
 def gethostname():
     import socket
     return socket.gethostname()
+
 
 # maybe not needed?
 def resolve_name(obj):
@@ -171,9 +173,16 @@ def get_default_parser():
     parser.add_option(
         "-d", "--database", dest='database', help='location of database file')
     parser.add_option(
+        "--manager", dest='manager', help="name of the manager process",
+        default="nbs.remote_manager")
+    parser.add_option(
+        "--worker", dest='worker', help="name of the manager process",
+        default='nbs.worker')
+    parser.add_option(
         "-v", "--verbosity", dest='verbosity', default='INFO',
         help='set logging level, options: DEBUG, INFO, CRITICAL, ERROR')
     return parser
+
 
 def parse_args(parser=None, args=None):
     parser = get_default_parser() if parser is None else parser

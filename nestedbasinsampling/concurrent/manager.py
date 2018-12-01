@@ -106,13 +106,24 @@ class NBS_Manager(BaseManager):
         return self._g_replica
 
     def get_job(self):
-        basin = self.jobs_left.keys()[
-            np.random.multinomial(1, np.random.dirichlet(
-                self.jobs_left.values())).nonzero()[0][0]]
-        if basin == 'nopt':
-            return self.nopt_job()
+        # get nonzero jobs left
+        basins, n_left = zip(*(
+            item for item in self.jobs_left.items() if item[1]))
+        n_basins = len(basins)  # number of basins still active
+
+        if n_basins:
+            if n_basins > 1:
+                p = np.random.dirichlet(n_left)
+                basin = basins[np.random.multinomial(1, p).nonzero()[0][0]]
+            else:
+                basin, = basins
+
+            if basin == 'nopt':
+                return self.nopt_job()
+            else:
+                return self.basin_nopt_job(basin)
         else:
-            return self.basin_nopt_job(basin)
+            return None
 
     def nopt_job(self):
         logger.debug('creating job')
@@ -156,7 +167,8 @@ class NBS_Manager(BaseManager):
         self.nfev_property.value += res.nfev
 
         self.database.session.commit()
-        self.jobs_left[label] -= 1
+        if self.jobs_left[label]:
+            self.jobs_left[label] -= 1
 
         logger.info((
             "received nested optimisation run, for basin {}, minE={:10.5g}, "
@@ -173,7 +185,8 @@ class NBS_Manager(BaseManager):
                 nruns,
                 ", ".join("{}={}".format(*item)
                           for item in self.jobs_left.items()))))
-        return not any(self.jobs_left.values())
+        criterion = not any(self.jobs_left.values())
+        return criterion
 
 
 @Pyro4.expose
@@ -202,6 +215,7 @@ class RemoteManager(BasePyro):
         with utils.getNS(**self.nameserver_kw) as ns:
             worker = Pyro4.Proxy(ns.lookup(worker_name))
             self.workers[worker_name] = worker
+
             self.manager.initalise_worker(worker_name, worker)
             worker.request_job()
 
@@ -220,6 +234,7 @@ class RemoteManager(BasePyro):
             with utils.getNS(**self.nameserver_kw) as ns:
                 worker = Pyro4.Proxy(ns.lookup(worker_name))
                 self.workers[worker_name] = worker
+
         self.workers[worker_name].request_job()
 
     def main_loop(self):
@@ -239,6 +254,8 @@ class RemoteManager(BasePyro):
         while not self.job_queue.full():
             job_id = next(self.count)
             job = self.manager.get_job()
+            if job is None:
+                return False
             self.job_queue.put((job_id, job))
 
         return True
@@ -254,10 +271,13 @@ class RemoteManager(BasePyro):
         """
         Terminate all registered workers and then the dispatcher.
         """
-        for workerid, worker in self.workers.items():
-            if utils.proxy_alive(worker):
-                logger.info("terminating worker %s" % workerid)
-                worker.exit()
+        # Doesn't seem to work...
+        # for workerid, worker in self.workers.items():
+        #     try:
+        #         worker.exit()
+        #         logger.info("terminating worker %s" % workerid)
+        #     except Exception:
+        #         pass
         logger.info("terminating remote manager")
         # exit the whole process (not just this thread ala sys.exit())
         os._exit(0)

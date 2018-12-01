@@ -15,7 +15,8 @@ settings = dict(
         remove_initial_angular_momentum=False),
     nopt_kws=dict(
         nsteps=2000, MC_steps=10, target_acc=0.4, nsave=30, tol=1e-2,
-        nwait=15, kalman_discount=100.))
+        nwait=20, kalman_discount=100., max_tries=5))
+
 
 def main():
     parser = utils.get_default_parser()
@@ -36,7 +37,8 @@ def main():
     manager = system.get_manager(
         options.database, max_iter=niter, mins=options.mins)
     remote_manager = RemoteManager(
-        manager, nameserver_kw=nameserver_kw, daemon_kw=daemon_kw)
+        manager, pyro_name=options.manager, worker_name=options.worker,
+        nameserver_kw=nameserver_kw, daemon_kw=daemon_kw)
     remote_manager.main()
 
 if __name__ == '__main__':

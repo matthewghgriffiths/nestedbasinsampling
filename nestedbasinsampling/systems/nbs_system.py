@@ -129,8 +129,12 @@ class NBS_system(object):
 
     @classmethod
     def Worker(cls):
+        from numpy.random import seed
+        seed(None)
+
         class WorkerClass(cls, BaseWorker):
             pass
+            
         return WorkerClass
 
     def get_manager(self, db=":memory:", **kwargs):
