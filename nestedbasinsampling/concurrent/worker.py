@@ -19,16 +19,8 @@ class BaseWorker(object):
         pass
 
     def __call__(self, job):
-        method, args, kwargs = job
+        method, args, kwargs, label = job
         return job, getattr(self, method)(*args, **kwargs)
-
-    @classmethod
-    def from_system(cls, system):
-        def call_system(job):
-            method, args, kwargs = job
-            return job, getattr(system, method)(*args, **kwargs)
-        system.__call__ = call_system
-        return system
 
 
 @Pyro4.expose

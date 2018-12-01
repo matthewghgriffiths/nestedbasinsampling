@@ -37,8 +37,11 @@ class BaseManager(object):
 
 
 class NBS_Manager(BaseManager):
+    """
+    basin_opts : dict[str, (Minimum, n_runs)]
+    """
     def __init__(self, nbs_system, database=None, max_iter=10,
-                 receive_funcs=None):
+                 basin_opts=None, mins=None):
         self.nbs_system = nbs_system
         if database is None:
             database = self.nbs_system.get_database()
@@ -55,38 +58,90 @@ class NBS_Manager(BaseManager):
             nfev = self.database.add_property('nfev', 0)
         self.nfev_property = nfev
 
-        self.receive_funcs = dict(nopt=self.add_run)
-        if receive_funcs is not None:
-            self.receive_funcs.update(receive_funcs)
+        self.jobs_left = {'nopt': max_iter}
+        self.basins = {'nopt': (None, self._g_replica)}  # for standard nopts
+
+        if basin_opts is not None:
+            # for basin nopts
+            for basin, (m, m_iter) in basin_opts.items():
+                self.jobs_left[basin] = m_iter
+                basin_rep = self.database.addReplica(
+                    np.inf, m.coords, stepsize=self.nbs_system.stepsize)
+                self.database.addPath(np.inf, basin_rep, m)
+                self.basins[basin] = m, basin_rep
+
+        if mins is not None:
+            self.parse_mins(mins)
+
+    def parse_mins(self, mins):
+        pot = self.nbs_system.pot
+        for basinm in mins:
+            logger.info("parsing {:s}".format(basinm))
+            min_path, m_iter = basinm.split('=')
+            _, min_name = os.path.split(min_path)
+            m_coords = np.loadtxt(min_path).flatten()
+            E = pot.getEnergy(m_coords)
+            m = self.database.addMinimum(E, m_coords)
+            basin_rep = self.database.addReplica(
+                np.inf, m.coords, stepsize=self.nbs_system.stepsize)
+            self.database.addPath(np.inf, basin_rep, m)
+
+            # adding jobs
+            self.basins[min_name] = (m, basin_rep)
+            self.jobs_left[min_name] = int(m_iter)
 
     @property
     def g_replica(self):
         if self._g_replica is None:
             replicas = self.database.session.query(Replica).\
-                order_by(Replica.energy.desc()).limit(1).all()
-            if replicas:
-                self._g_replica, = replicas
-            else:
+                order_by(Replica.energy.desc())
+            try:
+                self._g_replica, = (
+                    r for r in replicas if r.coords is None)
+            except ValueError:
+                # if no g_replicas exist make one
                 self._g_replica = self.database.addReplica(
                     np.inf, None, stepsize=self.nbs_system.stepsize)
 
         return self._g_replica
 
     def get_job(self):
+        basin = self.jobs_left.keys()[
+            np.random.multinomial(1, np.random.dirichlet(
+                self.jobs_left.values())).nonzero()[0][0]]
+        if basin == 'nopt':
+            return self.nopt_job()
+        else:
+            return self.basin_nopt_job(basin)
+
+    def nopt_job(self):
         logger.debug('creating job')
         rep = self.g_replica
-        return 'nopt', (rep.coords, np.inf, self.nbs_system.stepsize), {}
+        args = (rep.coords, np.inf, self.nbs_system.stepsize)
+        return 'nopt', args, {}, 'nopt'
+
+    def basin_nopt_job(self, basin):
+        m, basin_rep = self.basins[basin]
+        args = (m.coords, np.inf, self.nbs_system.stepsize)
+        kwargs = self.nbs_system.basin_nopt_kws
+        return ('nopt', args, kwargs, basin)
+
+    def find_basin(self, coords):
+        for basin, (m, basin_rep) in self.basins.iteritems():
+            if (m.coords == coords).all():
+                break
+        else:
+            raise Exception("coords not found")
+        return basin
 
     def _receive_work(self, work):
         self.results.append(work)
-        logger.info('RECEIVED')
-        self.curr_iter += 1
-        logger.info('received work, total = {:d}'.format(self.curr_iter))
 
     def add_run(self, work):
-        logger.debug('received work')
+        logger.debug('adding run')
         job, res = work
-        assert job[1][0] is None, job[1][1] == np.inf
+        method, args, kwargs, label = job
+        m, parent = self.basins[label]
 
         res = Result(res)
         Es = np.r_[res.initialenergy, res.Emax]
@@ -94,29 +149,31 @@ class NBS_Manager(BaseManager):
 
         # Adding to database
         child = self.database.addReplica(Es[-1], res.coords, commit=False)
-        m = self.database.addMinimum(res.energy, res.coords, commit=False)
-        parent = self.g_replica
+        if m is None:
+            m = self.database.addMinimum(res.energy, res.coords, commit=False)
         path = self.database.addPath(Es[-1], child, m, commit=False)
         run = self.database.addRun(Es, nlive, parent, child, commit=False)
         self.nfev_property.value += res.nfev
 
         self.database.session.commit()
-        self.curr_iter += 1
+        self.jobs_left[label] -= 1
 
-        logger.info(
-            ("received nested optimisation run,  minE={:10.5g}, nsteps={:4d}, "
-             "nfev={:7d}".format(m.energy, Es.size, res.nfev)))
+        logger.info((
+            "received nested optimisation run, for basin {}, minE={:10.5g}, "
+            "nsteps={:4d}, nfev={:7d}".format(
+                label, m.energy, Es.size, res.nfev)))
         return run, child, m, path
 
-    def receive_work(self, work):
-        job, output = work
-        job_name = job[0]
-        self.receive_funcs[job_name](work)
+    receive_work = add_run
 
     def stop_criterion(self):
         nruns = self.database.session.query(Run).count()
-        logger.info("database has {:d} runs".format(nruns))
-        return nruns > self.max_iter
+        logger.info((
+            "database has {:d} runs, jobs left: {:s}".format(
+                nruns,
+                ", ".join("{}={}".format(*item)
+                          for item in self.jobs_left.items()))))
+        return not any(self.jobs_left.values())
 
 
 @Pyro4.expose

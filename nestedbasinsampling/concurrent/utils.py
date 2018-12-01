@@ -152,7 +152,7 @@ def resolve_name(obj):
     return uri[5:].split('@')[0]
 
 
-def parse_args(args=None):
+def get_default_parser():
     from optparse import OptionParser
     parser = OptionParser()
     parser.add_option(
@@ -173,9 +173,14 @@ def parse_args(args=None):
     parser.add_option(
         "-v", "--verbosity", dest='verbosity', default='INFO',
         help='set logging level, options: DEBUG, INFO, CRITICAL, ERROR')
+    return parser
+
+def parse_args(parser=None, args=None):
+    parser = get_default_parser() if parser is None else parser
 
     options, args = parser.parse_args(args)
-    if options.host is None: options.host = gethostname()
+    if options.host is None:
+        options.host = gethostname()
     return options, args
 
 

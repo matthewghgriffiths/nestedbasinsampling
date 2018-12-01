@@ -387,8 +387,7 @@ class NoGUTSSampler(BaseSampler):
                 except NotImplementedError:
                     raise SamplingError(
                         "Starting configuration doesn't satisfy constraint",
-                        Estart=Enew, Econstraint=Econ)
-
+                        Estart=Ecut, Econstraint=Econ)
 
         E, G = None, None
         i = 0

@@ -15,16 +15,18 @@ class NBS_system(object):
     settings = {}
     default_sampler_kws = dict(max_depth=7)
     default_nopt_kws = dict(
-        nsteps=2000, MC_steps=5, target_acc=0.4,
-        nsave=20, tol=1e-2, nwait=10)
+        nsteps=2000, MC_steps=5, target_acc=0.4, nsave=20, tol=1e-2, nwait=10)
     default_struct_kws = dict(niter=100)
     default_database_kws = dict()
+    default_basin_nopt_kws = dict(
+        nsteps=2000, MC_steps=5, target_acc=0.4, nsave=20, tol=1e-2, nwait=10,
+        basin_optimization=True, use_quench=False)
     _sampler = None
 
     def __init__(self, pot, random_configuration=None, constraint=None,
                  stepsize=None, sampler_kws=None, nopt_kws=None,
                  stepsize_kws=None, struct_kws=None, database_kws=None,
-                 _Sampler=NoGUTSSampler):
+                 basin_nopt_kws=None, _Sampler=NoGUTSSampler):
         self.pot = pot
         if random_configuration is not None:
             self.get_random_configuration = random_configuration
@@ -34,11 +36,12 @@ class NBS_system(object):
         self.settings = dict(
             stepsize=stepsize, sampler_kws=sampler_kws, nopt_kws=nopt_kws,
             stepsize_kws=stepsize_kws, struct_kws=struct_kws,
-            database_kws=database_kws)
+            database_kws=database_kws, basin_nopt_kws=basin_nopt_kws)
         self.initialise(**self.settings)
 
     def initialise(self, stepsize=None, sampler_kws=None, nopt_kws=None,
-                   stepsize_kws=None, struct_kws=None, database_kws=None):
+                   stepsize_kws=None, struct_kws=None, database_kws=None,
+                   basin_nopt_kws=None):
         self.sampler_kws = self.default_sampler_kws.copy()
         if sampler_kws is not None:
             self.sampler_kws.update(sampler_kws)
@@ -47,6 +50,12 @@ class NBS_system(object):
         self.nopt_kws = self.default_nopt_kws.copy()
         if nopt_kws is not None:
             self.nopt_kws.update(nopt_kws)
+
+        self.basin_nopt_kws = self.default_basin_nopt_kws.copy()
+        if basin_nopt_kws is not None:
+            self.basin_nopt_kws.update(basin_nopt_kws)
+        elif nopt_kws is not None:
+            self.basin_nopt_kws.update(nopt_kws)
 
         self.struct_kws = self.default_struct_kws.copy()
         if struct_kws is not None:

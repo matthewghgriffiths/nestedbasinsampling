@@ -1,0 +1,43 @@
+#!/usr/bin/python
+import logging
+import sys
+from nestedbasinsampling import NBS_LJ, LOG_CONFIG
+from nestedbasinsampling.concurrent import RemoteManager, utils
+
+logger = logging.getLogger('nbs.LJ_manager')
+
+settings = dict(
+    natoms=31, stepsize=0.1,
+    sampler_kws=dict(
+        max_depth=7, remove_linear_momentum=True,
+        remove_angular_momentum=True,
+        remove_initial_linear_momentum=False,
+        remove_initial_angular_momentum=False),
+    nopt_kws=dict(
+        nsteps=2000, MC_steps=10, target_acc=0.4, nsave=30, tol=1e-2,
+        nwait=15, kalman_discount=100.))
+
+def main():
+    parser = utils.get_default_parser()
+    parser.add_option(
+        "-m", "--min", dest='mins', action='append', help="mins to load")
+    options, args = utils.parse_args(parser)
+
+    level = getattr(logging, options.verbosity)
+    logging.basicConfig(level=level, **LOG_CONFIG)
+    logger.info("running %s" % " ".join(sys.argv))
+    logger.info("received options={:}".format(options))
+
+    niter = options.niter
+    nameserver_kw = dict(host=options.nameserver, port=options.nsport)
+    daemon_kw = dict(host=options.host, port=options.port)
+
+    system = NBS_LJ(**settings)
+    manager = system.get_manager(
+        options.database, max_iter=niter, mins=options.mins)
+    remote_manager = RemoteManager(
+        manager, nameserver_kw=nameserver_kw, daemon_kw=daemon_kw)
+    remote_manager.main()
+
+if __name__ == '__main__':
+    main()
