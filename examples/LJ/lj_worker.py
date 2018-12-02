@@ -16,8 +16,11 @@ def main():
     logger.info("running %s" % " ".join(sys.argv))
     logger.info("received options={:}".format(options))
 
+    nameserver_kw = dict(host=options.nameserver, port=options.nsport)
+    daemon_kw = dict(host=options.host, port=options.port)
     RemoteWorker(LJ_worker(natoms=31, radius=2.5), pyro_name=options.worker,
-                 manager_name=options.manager).main()
+                 manager_name=options.manager, nameserver_kw=nameserver_kw,
+                 daemon_kw=daemon_kw).main()
 
 
 if __name__ == '__main__':

@@ -16,6 +16,20 @@ python lj_manager.py -n dexter\
     -m ../../data/LJ31/min-133.59.txt=1000\
     --database=lj31_01.sqlite
 
+python lj_manager.py -n dexter\
+    -i 0 \
+    -m ../../data/LJ31/min-133.10.txt=5\
+    -m ../../data/LJ31/min-133.18.txt=5\
+    -m ../../data/LJ31/min-133.29.txt=5\
+    -m ../../data/LJ31/min-133.59.txt=5\
+
+python lj_manager.py \
+    -i 5 \
+    -m ../../data/LJ31/min-133.10.txt=5\
+    -m ../../data/LJ31/min-133.18.txt=5\
+    -m ../../data/LJ31/min-133.29.txt=5\
+    -m ../../data/LJ31/min-133.59.txt=5\
+    --database=lj31_01.sqlite
 
 """
 
