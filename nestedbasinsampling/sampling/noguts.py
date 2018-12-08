@@ -24,23 +24,26 @@ logger = logging.getLogger('NBS.NoGUTS')
 
 
 class NoGUTSSampler(BaseSampler):
-    """
+    """This class suffers from PNS syndrome
     """
     noguts = noguts
     has_fortran = has_fortran
+
     def __init__(
-        self, pot, genstep=None, constraint=None, remove_linear_momentum=False,
-        nsteps=10, stepsize=0.1, max_depth=None, remove_angular_momentum=False,
-        remove_initial_linear_momentum=False, min_rotation=False,
-        remove_initial_angular_momentum=False, fix_centroid=False,
-        seed=None, rand_state=None, testinitial=True, fixConstraint=False,
-        maxreject=1000, debug=False):
+            self, pot, genstep=None, constraint=None,
+            remove_linear_momentum=False, nsteps=10, stepsize=0.1,
+            max_depth=None, remove_angular_momentum=False,
+            remove_initial_linear_momentum=False, min_rotation=False,
+            remove_initial_angular_momentum=False, fix_centroid=False,
+            seed=None, rand_state=None, testinitial=True, fixConstraint=False,
+            maxreject=1000, debug=False):
 
         self.pot = pot
         if genstep is not None:
             self.genstep = genstep
-        self.constraint = BaseConstraint() if constraint is None else constraint
-        self.stepsize =  stepsize
+        self.constraint = \
+            BaseConstraint() if constraint is None else constraint
+        self.stepsize = stepsize
         self.nsteps = nsteps
         self.testinitial = testinitial
         self.max_depth = max_depth
@@ -194,7 +197,7 @@ class NoGUTSSampler(BaseSampler):
             X_n, p_n, EG_n, (Eaccept, Caccept, reflect) = \
                 self.take_step(X, p[v < 0], Ecut, v * epsilon)
 
-            p_n = p_n[::v] # reverse momentum pair if going backwards
+            p_n = p_n[::v]  # reverse momentum pair if going backwards
             # Set the return values---minus=plus for all things here, since the
             # "tree" is of depth 0.
             X_m = X_n[:]
@@ -409,6 +412,7 @@ class NoGUTSSampler(BaseSampler):
 
         res.energy = newres.energy
         res.grad = newres.grad
+        res.nsteps = res.nfev
 
         return res
 
@@ -508,6 +512,13 @@ class NoGUTSSampler(BaseSampler):
             stepsize, float(naccept)/float(naccept + nreject)))
         return stepsizes
 
+
+class NoGUTSWalker(NoGUTSSampler):
+    """Interface to work with nested_sampling/sens
+    """
+    def __call__(self, x0, stepsize, Emax, energy, seed=None):
+        self.seed = seed
+        super(NoGUTSWalker, self).__call__(Emax, x0, stepsize=stepsize)
 
 
 if __name__ == "__main__":

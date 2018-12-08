@@ -4,7 +4,7 @@ from .sampling import (
     vec_random, random_structure, vector_random_uniform_hypersphere,
     vec_random_ndim, random_step, hypersphere_step, TakestepHyperSphere,
     AdaptiveTakestepHyperSphere, NoGUTSSampler, GalileanSampler, MCSampler,
-    ExplicitNoGUTSSampler)
+    ExplicitNoGUTSSampler, NoGUTSWalker)
 from .optimize import (
     NestedOptimizerKalman, NestedOptimizer, RecordMinimization)
 from .graphs import BasinGraph, ReplicaGraph, SuperBasin
