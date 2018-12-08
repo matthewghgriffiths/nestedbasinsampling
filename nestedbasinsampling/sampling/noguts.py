@@ -413,6 +413,7 @@ class NoGUTSSampler(BaseSampler):
         res.energy = newres.energy
         res.grad = newres.grad
         res.nsteps = res.nfev
+        res.x = result.x
 
         return res
 
