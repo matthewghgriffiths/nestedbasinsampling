@@ -517,7 +517,6 @@ class NoGUTSWalker(NoGUTSSampler):
     """Interface to work with nested_sampling/sens
     """
     def __call__(self, x0, stepsize, Emax, energy, seed=None):
-        self.seed = seed
         super(NoGUTSWalker, self).__call__(Emax, x0, stepsize=stepsize)
 
 
