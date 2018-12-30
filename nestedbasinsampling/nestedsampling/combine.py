@@ -4,7 +4,7 @@ from itertools import izip, izip_longest, repeat, chain
 import numpy as np
 
 try:
-    from .fortran import combine
+    from .fortran import combineruns as combine
     has_fortran = True
 except ImportError:
     has_fortran = False
