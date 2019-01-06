@@ -163,7 +163,10 @@ class NBS_Manager(BaseManager):
         if m is None:
             m = self.database.addMinimum(res.energy, res.coords, commit=False)
         path = self.database.addPath(Es[-1], child, m, commit=False)
-        run = self.database.addRun(Es, nlive, parent, child, commit=False)
+        run = self.database.addRun(
+            Es, nlive, parent, child, commit=False)
+        if 'stepsize' in res:
+            run.stepsizes = res.stepsize
         self.nfev_property.value += res.nfev
 
         self.database.session.commit()

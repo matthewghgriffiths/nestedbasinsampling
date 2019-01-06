@@ -371,6 +371,7 @@ class NoGUTSSampler(BaseSampler):
         nsteps = self.nsteps if nsteps is None else nsteps
 
         res = Result()
+        res.Ecut = Ecut
         res.naccept = 0
         res.nreject = 0
         res.tot_accept = 0
@@ -469,8 +470,8 @@ class NoGUTSSampler(BaseSampler):
         conpot = self.constraint.getGlobalPotential(coords)
         disp = np.zeros(3)
         res = lbfgs_cpp(disp, conpot, **kwargs)
-        pos = coords.reshape(-1,3)
-        pos += res.coords[None,:]
+        pos = coords.reshape(-1, 3)
+        pos += res.coords[None, :]
         return coords
 
     def fixConstraint(self, *arg, **kwargs):
