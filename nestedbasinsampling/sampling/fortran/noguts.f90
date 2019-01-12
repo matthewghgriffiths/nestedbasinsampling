@@ -1,6 +1,11 @@
 module noguts
 
-integer(kind=4), save :: seed=1
+integer, parameter  :: int32  = selected_int_kind(9)
+integer, parameter  :: int64  = selected_int_kind(18)
+integer, parameter  :: real32 = selected_real_kind(6, 37)
+integer, parameter  :: real64 = selected_real_kind(15, 307)
+
+integer(int32), save :: seed=1
 logical, save :: remove_linear_momentum=.FALSE., remove_angular_momentum=.FALSE.
 contains
 
@@ -81,8 +86,8 @@ function r_uniform() result(rand)
 !
   implicit none
 
-  integer ( kind = 8 ) k
-  real ( kind = 8 ) rand
+  integer(int32) k
+  double precision rand
 !  integer ( kind = 4 ) seed
 
   k = seed / 127773
@@ -96,7 +101,7 @@ function r_uniform() result(rand)
 !  Although SEED can be represented exactly as a 32 bit integer,
 !  it generally cannot be represented exactly as a 32 bit real number!
 !
-  rand = real ( seed, kind = 8 ) * 4.656612875D-10
+  rand = dble(seed) * 4.656612875D-10
 
   return
 end
@@ -134,10 +139,10 @@ function r_normal ()
 !
   implicit none
 
-  real ( kind = 8 ) r1
-  real ( kind = 8 ) r2
-  real ( kind = 8 ) r_normal
-  real ( kind = 8 ), parameter :: r8_pi = 3.141592653589793D+00
+  double precision r1
+  double precision r2
+  double precision r_normal
+  double precision, parameter :: r8_pi = 3.141592653589793D+00
  ! real ( kind = 8 ) r8_uniform_01
  ! integer ( kind = 4 ) seed
 

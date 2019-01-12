@@ -8,6 +8,11 @@ from nestedbasinsampling.concurrent import RemoteManager, utils
 
 example run:
 
+python lj_manager.py \
+    -i 0 \
+    -m ../../data/LJ31/min-133.10.txt=100\
+    --database=lj31_06.sqlite
+
 python lj_manager.py -n dexter\
     -i 5000 \
     -m ../../data/LJ31/min-133.10.txt=1000\
@@ -43,7 +48,7 @@ settings = dict(
         remove_initial_linear_momentum=False,
         remove_initial_angular_momentum=False),
     nopt_kws=dict(
-        nsteps=2000, MC_steps=10, target_acc=0.4, nsave=40, tol=1e-2,
+        nsteps=2000, MC_steps=20, target_acc=0.4, nsave=40, tol=1e-2,
         nwait=10, kalman_discount=100., max_tries=5))
 
 
