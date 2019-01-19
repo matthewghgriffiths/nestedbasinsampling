@@ -49,7 +49,7 @@ settings = dict(
         remove_initial_angular_momentum=False),
     nopt_kws=dict(
         nsteps=2000, MC_steps=20, target_acc=0.4, nsave=40, tol=1e-2,
-        nwait=10, kalman_discount=100., max_tries=5))
+        nwait=10, kalman_discount=100., linreg_window=100))
 
 
 def main():
