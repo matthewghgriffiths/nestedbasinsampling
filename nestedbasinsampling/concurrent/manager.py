@@ -3,6 +3,8 @@ import os
 import logging
 import Queue as queue
 from itertools import count
+from collections import deque
+import time
 
 import numpy as np
 import Pyro4
@@ -41,13 +43,14 @@ class NBS_Manager(BaseManager):
     basin_opts : dict[str, (Minimum, n_runs)]
     """
     def __init__(self, nbs_system, database=None, max_iter=10,
-                 basin_opts=None, mins=None):
+                 basin_opts=None, mins=None, n_remember=20):
         self.nbs_system = nbs_system
         if database is None:
             database = self.nbs_system.get_database()
         self.database = database
         self.settings = getattr(self.nbs_system, 'settings', {})
 
+        self.time_received = deque(maxlen=n_remember)
         self.max_iter = int(max_iter)
         self.curr_iter = 0
         self._g_replica = None
@@ -82,8 +85,17 @@ class NBS_Manager(BaseManager):
             m_coords = np.loadtxt(min_path).flatten()
             E = pot.getEnergy(m_coords)
             m = self.database.addMinimum(E, m_coords)
-            basin_rep = self.database.addReplica(
-                np.inf, m.coords, stepsize=self.nbs_system.stepsize)
+            q = self.database.session.query(
+                Replica).filter(Replica.energy==np.inf)
+            for basin_rep in q:
+                # check if there already exists appropriate replica
+                if (basin_rep.coords is not None and
+                        self.database.compareMinima(m, basin_rep)):
+                    break
+            else:
+                # if none exist then make new one
+                basin_rep = self.database.addReplica(
+                    np.inf, m.coords, stepsize=self.nbs_system.stepsize)
             self.database.addPath(np.inf, basin_rep, m)
 
             # adding jobs
@@ -148,8 +160,31 @@ class NBS_Manager(BaseManager):
     def _receive_work(self, work):
         self.results.append(work)
 
+    def _get_rate(self):
+        if len(self.time_received) > 1:
+            return (len(self.time_received) - 1) / (
+                self.time_received[-1] - self.time_received[0])
+        else:
+            return 0.
+
+    def _ttc(self):
+        rate = self._get_rate()
+        if rate:
+            njobs = sum(self.jobs_left.values())
+            t = njobs / rate
+            print(njobs, rate, t)
+            mins, s = divmod(int(t), 60)
+            h, m = divmod(mins, 60)
+            if h:
+                return '{0:d}:{1:02d}:{2:02d}'.format(h, m, s)
+            else:
+                return '{0:02d}:{1:02d}'.format(m, s)
+        else:
+            return '?'
+
     def add_run(self, work):
         logger.debug('adding run')
+        self.time_received.append(time.time())
         job, res = work
         method, args, kwargs, label = job
         m, parent = self.basins[label]
@@ -176,8 +211,8 @@ class NBS_Manager(BaseManager):
 
         logger.info((
             "received nested optimisation run, for basin {}, minE={:10.5g}, "
-            "nsteps={:4d}, nfev={:7d}".format(
-                label, m.energy, Es.size, res.nfev)))
+            "nsteps={:4d}, nfev={:7d}, rate={:6.2g} it/s".format(
+                label, m.energy, Es.size, res.nfev, self._get_rate())))
         return run, child, m, path
 
     receive_work = add_run
@@ -185,8 +220,9 @@ class NBS_Manager(BaseManager):
     def stop_criterion(self):
         nruns = self.database.session.query(Run).count()
         logger.info((
-            "database has {:d} runs, jobs left: {:s}".format(
+            "database has {:d} runs, time left: {:s}, jobs left: {:s}".format(
                 nruns,
+                self._ttc(),
                 ", ".join("{}={}".format(*item)
                           for item in self.jobs_left.items()))))
         criterion = not any(self.jobs_left.values())

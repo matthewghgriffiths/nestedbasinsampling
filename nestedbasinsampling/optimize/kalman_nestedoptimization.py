@@ -48,7 +48,7 @@ class NestedOptimizerKalman(object):
                  basin_optimization=False, basinE=None,
                  alternate_stop_criterion=None, max_tries=0,
                  events=None, iprint=-1, nsteps=10000, debug=False,
-                 target=None, use_quench=True,
+                 target=None, use_quench=True, save_results=False,
                  energy=None, gradient=None, store_configs=False,
                  quench=lbfgs_cpp, quenchtol=1e-6, quench_kw=None):
 
@@ -67,6 +67,8 @@ class NestedOptimizerKalman(object):
         self.kalman_discount = kalman_discount
         self.nwait = nwait
         self.nsave = nsave
+        self.save_results = save_results
+        self.all_results = []
         self.last_results = deque(maxlen=nsave)
         assert nsave >= nwait
 
@@ -143,6 +145,10 @@ class NestedOptimizerKalman(object):
             self.kalman.P = np.clip(self.kalman.P, -0.7, 0.7)
             a = X1
             self.stepsize = np.exp(a)*self._p_factor
+            # logger.info("kalman {:s}".format(str(
+            #     (self.iter_number, self.E, a, self.stepsize,
+            #      res['naccept'], res['nreject'])
+            #     )))
 
     def one_iteration(self):
         try:
@@ -152,6 +158,8 @@ class NestedOptimizerKalman(object):
 
             if res.energy < self.E:
                 self.last_results.append(res)
+                if self.save_results:
+                    self.all_results.append(res)
 
                 self.Xlast[:] = self.X
                 self.X[:] = res.coords
@@ -186,6 +194,7 @@ class NestedOptimizerKalman(object):
                     "no steps were accepted, E={:10.5}, stepsize={:10.5g}, "
                     "halving stepsize").format(self.E, self.stepsize))
                 self.stepsize /= 2
+                self.kalman.X[0] -= np.log(2)
                 self.n_tries += 1
                 if self.n_tries >= self.max_tries:
                     raise SamplineError()
@@ -195,12 +204,24 @@ class NestedOptimizerKalman(object):
 
         except SamplingError as e:
             if self.n_tries < self.max_tries:
-                logger.error("Sampling error{}".format(e.args))
                 logger.warning((
-                    "no steps were accepted, E={:10.5}, stepsize={:10.5g}, "
+                    "Sampling error, E={:10.5}, stepsize={:10.5g}, "
                     "halving stepsize").format(self.E, self.stepsize))
+                res = self.last_results[0]
+                logger.warning(
+                    ("E={energy}, s={stepsize}, nacc={naccept}, "
+                     "nrej={nreject}").format(**res))
+                res = self.last_results[-self.nwait-1]
+                logger.warning(
+                    ("E={energy}, s={stepsize}, nacc={naccept}, "
+                     "nrej={nreject}").format(**res))
+                res = self.last_results[-1]
+                logger.warning(
+                    ("E={energy}, s={stepsize}, nacc={naccept}, "
+                     "nrej={nreject}").format(**res))
                 self.n_tries += 1
                 self.stepsize /= 2
+                self.kalman.X[0] -= np.log(2)
             else:
                 self.result.message.append('Sampling Error')
                 if self.use_quench:
@@ -289,10 +310,12 @@ class NestedOptimizerKalman(object):
         res.nsteps = self.nopt
         res.success = self.stop_criterion()
         res.nfev = self.nfev
+        if self.save_results:
+            res.results = self.all_results
         return res
 
-if __name__ == '__main__':
 
+if __name__ == '__main__':
     import matplotlib.pyplot as plt
 
     from pele.potentials import LJ

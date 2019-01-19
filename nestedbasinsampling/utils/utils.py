@@ -7,14 +7,17 @@ import numpy as np
 from math import sin, cos, acos
 from scipy.special import gamma
 
+
 def hyperspherevol(n, R=1.):
     return np.pi**(0.5*n) * R**n / gamma(0.5*n + 1)
 
+
 def weighted_choice(ps):
-    cdf = np.r_[0.,ps].cumsum()
+    cdf = np.r_[0., ps].cumsum()
     cdf /= cdf[-1]
     rand = np.random.rand()
     return cdf.searchsorted(rand)-1
+
 
 def iter_minlength(iterable, minlength):
     try:
@@ -22,6 +25,7 @@ def iter_minlength(iterable, minlength):
         return True
     except StopIteration:
         return False
+
 
 def len_iter(iterable):
     """
@@ -31,6 +35,7 @@ def len_iter(iterable):
     deque(izip(iterable, counter), maxlen=0)
     return next(counter)
 
+
 def dict_update_keep(toupdate, update):
     """
     updates dict toupdate with values from dict update, except if key already
@@ -39,6 +44,7 @@ def dict_update_keep(toupdate, update):
     toupdate.update(pair for pair in update.iteritems()
                     if pair[0] not in toupdate or toupdate[pair[0]] is None)
     return toupdate
+
 
 def dict_update_copy(primary, update):
     """
@@ -53,12 +59,13 @@ def dict_update_copy(primary, update):
                     if pair[1] is not None or pair[0] not in update)
     return toupdate
 
+
 def call_counter(func):
     def helper(*args, **kwargs):
         helper.calls += 1
         return func(*args, **kwargs)
     helper.calls = 0
-    helper.__name__= func.__name__
+    helper.__name__ = func.__name__
     return helper
 
 
@@ -91,6 +98,7 @@ def angle_axis2mat(vector):
                      [xyC + zs, y * yC + c, yzC - xs],
                      [zxC - ys, yzC + xs, z * zC + c]])
 
+
 def mat2angle_axis(M):
     ''' Calculates rotation vector where the norm of the rotation vector
     indicates the angle of rotation from a rotation matrix M
@@ -110,3 +118,40 @@ def mat2angle_axis(M):
     v = np.array([M[2,1]-M[1,2],M[0,2]-M[2,0],M[1,0]-M[0,1]])
     v *= 0.5*theta/sin(theta)
     return v
+
+
+class RollingLinRegress(object):
+    def __init__(self, window):
+        self.window = window
+        self.xs = deque(maxlen=window)
+        self.ys = deque(maxlen=window)
+
+        self.xsum = 0.
+        self.ysum = 0.
+        self.x2sum = 0.
+        self.xysum = 0.
+
+    def update(self, x, y):
+        if len(self.xs) == self.window:
+            x0, y0 = self.xs[0], self.ys[0]
+        else:
+            x0, y0 = 0., 0.
+
+        self.xsum = x - x0 + self.xsum
+        self.ysum = y - y0 + self.ysum
+        self.x2sum = x*x - x0 * x0 + self.x2sum
+        self.xysum = x*y - x0 * y0 + self.xysum
+        self.xs.append(x)
+        self.ys.append(y)
+
+        n = len(self.xs)
+        if n > 1:
+            self.slope = ((self.xysum * n - self.xsum * self.ysum) /
+                          (self.x2sum * n - self.xsum * self.xsum))
+        else:
+            self.slope = 0.
+
+        self.intercept = (self.ysum - self.slope * self.xsum) / n
+
+    def predict(self, x):
+        return self.slope * x + self.intercept
