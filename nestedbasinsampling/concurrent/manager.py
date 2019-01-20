@@ -172,7 +172,6 @@ class NBS_Manager(BaseManager):
         if rate:
             njobs = sum(self.jobs_left.values())
             t = njobs / rate
-            print(njobs, rate, t)
             mins, s = divmod(int(t), 60)
             h, m = divmod(mins, 60)
             if h:
