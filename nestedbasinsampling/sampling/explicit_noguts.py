@@ -175,13 +175,7 @@ if __name__ == "__main__":
     from pele.potentials import BasePotential
     from nestedbasinsampling.storage import Database, Minimum, Run, Replica
     from nestedbasinsampling.sampling.takestep import (
-    vec_random_ndim, vector_random_uniform_hypersphere)
-    from nestedbasinsampling.structure.constraints import (
-    BaseConstraint, HardShellConstraint)
-    from nestedbasinsampling.sampling.stats import (
-    CDF, AndersonDarling, AgglomerativeCDFClustering)
-    from nestedbasinsampling.optimize.nestedbasinoptimization import (
-    NestedBasinOptimizer)
+        vec_random_ndim, vector_random_uniform_hypersphere)
     from nestedbasinsampling.utils import Result
     from tqdm import tqdm
 
@@ -192,7 +186,7 @@ if __name__ == "__main__":
             self.M = np.array(M, float)
 
         def getEnergy(self, x):
-            return  0.5*self.M.dot(x).dot(x)
+            return 0.5*self.M.dot(x).dot(x)
 
         def getGradient(self, x):
             return - self.M.dot(x)
@@ -228,25 +222,42 @@ if __name__ == "__main__":
     energy = None
     grad = None
 
+    _quiver_kws = dict(headlength=3, headwidth=3, width=0.008)
+
     def plot_trajectory(
-            trajectory, linec= 'k', gradc='b', acceptc='g', rejectc='r'):
+            trajectory,
+            accept_marker='o', reject_marker='x',
+            linec='k', gradc='b', acceptc='g', rejectc='r',
+            plot_grad=True, plot_end_arrows=False, ax=None,
+            reject_kws={}, accept_kws={}, grad_kws={}):
         Es, Gs, path, ps = map(np.array, zip(*trajectory))[:4]
         X, Y = path.T
         dX, dY = Gs.T
         U, V = ps.T * epsilon
         cutoff = (Es > Ecut)
 
-        plt.plot(X, Y, c=linec)
-        plt.scatter(X[cutoff], Y[cutoff], c=rejectc, marker='x')
-        plt.scatter(X[~ cutoff], Y[~ cutoff], c=acceptc, marker='o')
-        plt.quiver(X[cutoff], Y[cutoff], dX[cutoff], dY[cutoff],
-                   angles='xy', scale_units='xy',color=gradc)
-        plt.quiver(X[0], Y[0], *(-0.5*ps[0,1]*epsilon), color=linec,
-                   angles='xy', scale_units='xy', scale=1.,
-                   headlength=3, headwidth=3, width=0.008)
-        plt.quiver(X[-1], Y[-1], *(0.5*ps[-1,0]*epsilon), color=linec,
-                   angles='xy', scale_units='xy', scale=1.,
-                   headlength=3, headwidth=3, width=0.008)
+        if ax is None:
+            ax = plt.gca()
+
+        l, = ax.plot(X, Y, c=linec)
+        s1 = ax.scatter(
+            X[cutoff], Y[cutoff], c=rejectc, marker=reject_marker, **reject_kws)
+        s2 = ax.scatter(X[~ cutoff], Y[~ cutoff], c=acceptc,
+                         marker=accept_marker, **accept_kws)
+        Q = None
+        if plot_grad:
+            Q = ax.quiver(X[cutoff], Y[cutoff], dX[cutoff], dY[cutoff],
+                       angles='xy', scale_units='xy', color=gradc,
+                       **grad_kws)
+        if plot_end_arrows:
+            ax.quiver(X[0], Y[0], *(-0.5*ps[0,1]*epsilon), color=linec,
+                       angles='xy', scale_units='xy', scale=1.,
+                       headlength=3, headwidth=3, width=0.008)
+            ax.quiver(X[-1], Y[-1], *(0.5*ps[-1,0]*epsilon), color=linec,
+                       angles='xy', scale_units='xy', scale=1.,
+                       headlength=3, headwidth=3, width=0.008)
+
+        return l, s1, s2, Q
 
     def integrate(coords, p, Ecut, epsilon=0.01):
         coords = np.array(coords)
@@ -258,11 +269,11 @@ if __name__ == "__main__":
             coords = new_coords
             p = new_p[0]
 
-    coords = random_coords(Ecut)
+    np.random.seed(0)
+    # coords = random_coords(Ecut)
+    coords = np.array([-0.2, 0.1])
     trajectory, v, rejected = nuts.nuts_step(coords, Ecut, epsilon=epsilon)
-
     Es, Gs, path, ps, ds = map(np.array, zip(*trajectory))
-
     integrator = integrate(
         trajectory[0][2], -trajectory[0][3][1], Ecut, epsilon=epsilon)
     _, back = zip(*zip(tqdm(xrange(len(trajectory))), integrator))
@@ -271,34 +282,60 @@ if __name__ == "__main__":
     _, forward = zip(*zip(tqdm(xrange(len(trajectory))), integrator))
 
 
-    plt.xlim(-a-2*epsilon, a+2*epsilon)
+    sns.set(style="ticks", color_codes=True, font_scale=1.)
+    plt.rc('font',**{'family':'serif'})
+    plt.rc('text', usetex=True)
+    plt.rcParams.update({"text.latex.preamble":[r'\usepackage{palatino}']})
+    width = 483.7/72
+    plt.rcParams["mathtext.fontset"] = "custom"
+
+    import matplotlib.lines as mlines
+
+    f, ax = plt.subplots(figsize=(width, 0.3*width))
+    plt.axis('off')
+    plt.xlim(-a-2*epsilon, a+2*epsilon + 1.5)
     plt.ylim(-b-2*epsilon, b+2*epsilon)
-    plt.plot(a*np.cos(theta)*Ecut**0.5, b*np.sin(theta)*Ecut**0.5)
-    plt.gca().set_aspect('equal')
+    ax.plot(a*np.cos(theta)*Ecut**0.5, b*np.sin(theta)*Ecut**0.5, c='k')
+    ax.set_aspect('equal')
     if rejected:
-        if v < 0:
-            plot_trajectory(
-                back, linec='r', acceptc=[[1.,0.,0.,0.5]], rejectc=[[1.,0.,0.,0.5]])
-        else:
-            plot_trajectory(
-                forward, linec='r', acceptc=[[1.,0.,0.,0.5]], rejectc=[[1.,0.,0.,0.5]])
-    plot_trajectory(trajectory)
-    print ds
+        plot_trajectory(
+            back if v < 0 else forward, linec='r', accept_marker='.',
+            acceptc='r', rejectc='r',
+            gradc='k', grad_kws=dict(width=0.003), ax=ax)
 
+    plt.scatter(*coords, color='g', marker='o', label='start position')
+    l, s1, s2, Q = plot_trajectory(trajectory, accept_marker='.', ax=ax,
+                                   gradc='k', grad_kws=dict(width=0.003))
+    acc = mlines.Line2D([], [], color='k', marker='.', markeredgecolor='g',
+                        markerfacecolor='g', label='Accepted slice')
+    rej = mlines.Line2D([], [], color='r', marker='.', markeredgecolor='r',
+                        label='Rejected slice')
+    invalid = plt.scatter(
+        [], [], color='r', marker='x', label='Invalid points')
+    l = ax.legend(handles=[acc, rej, invalid, Q], loc='right')
+    loc = l.get_frame().get_bbox().inverse_transformed(ax.transAxes)
+    Qkey = ax.quiverkey(Q, X=.8, Y=0.32, U=300,
+                        label='Gradient', coordinates='figure',
+                         labelpos='E', fontproperties=dict(size='10'))
+    plt.tight_layout()
+    f.savefig("noguts2d.pdf")
+    f.savefig("noguts2d.svg")
 
+if 0:
+    np.random.seed(3)
+    plt.figure()
     plt.xlim(-a-2*epsilon, a+2*epsilon)
     plt.ylim(-b-2*epsilon, b+2*epsilon)
     plt.plot(a*np.cos(theta)*Ecut**0.5, b*np.sin(theta)*Ecut**0.5, c='k')
     plt.gca().set_aspect('equal')
-    for i in xrange(0):
-        coords = random_coords(Ecut) * 0.
-        trajectory, rejected, rejected2 = nuts.nuts_step(coords, Ecut, epsilon=epsilon)
-        plot_trajectory(trajectory)
-        if rejected:
-            plot_trajectory(rejected, linec='r', gradc=[[0.,0.,0.,0.]],
-                            acceptc=[[1.,0.,0.,1.]], rejectc=[[1.,0.,0.,1.]])
-            Es, Gs, path, ps = map(np.array, zip(*rejected))
-        if rejected2:
-            plot_trajectory(rejected2, linec='r', gradc=[[0.,0.,0.,0.]],
-                            acceptc=[[1.,0.,0.,0.5]], rejectc=[[1.,0.,0.,0.5]])
-            Es, Gs, path, ps = map(np.array, zip(*rejected2))
+    trajectory = [(0, None, random_coords(Ecut))]
+    for i in xrange(10):
+        valid = [point[2] for point in trajectory if point[0] < Ecut]
+        j = np.random.randint(len(valid))
+        coords = valid[j]
+        plt.scatter(*coords, color='g', marker='o')
+        print i, j, len(valid)
+        trajectory, rejected, rejected2 = nuts.nuts_step(
+            coords, Ecut, epsilon=epsilon)
+        plt.scatter(*coords, color='g', marker='o')
+        plot_trajectory(trajectory, acceptc='g', accept_marker='+')
